@@ -1,0 +1,292 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum OrgType { ESTATE SHOP CHURCH MOSQUE }
+enum MembershipRole { ORG_ADMIN SECURITY RESIDENT MEMBER STAFF }
+enum MembershipStatus { PENDING APPROVED REJECTED SUSPENDED }
+enum PassStatus { ACTIVE COMPLETED EXPIRED REVOKED }
+enum GateAction { ENTRY EXIT }
+enum ChatPrivacy { EVERYONE MY_ORGS_ONLY REQUEST_ONLY ADMINS_ONLY }
+enum ConversationStatus { ACTIVE REQUESTED DECLINED }
+enum TicketStatus { OPEN IN_PROGRESS RESOLVED CLOSED }
+enum SosStatus { OPEN ACKNOWLEDGED RESOLVED }
+
+model User {
+  id           String      @id @default(uuid())
+  fullName     String
+  email        String?     @unique
+  phone        String      @unique
+  passwordHash String
+  avatarUrl    String?
+  isSuperAdmin Boolean     @default(false)
+  isActive     Boolean     @default(true)
+  chatPrivacy  ChatPrivacy @default(EVERYONE)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  refreshTokens RefreshToken[]
+  memberships   Membership[]
+  hostedPasses  VisitorPass[]  @relation("PassHost")
+  gateLogs      GateLog[]
+  sentMessages  Message[]
+  notifications Notification[]
+  deviceTokens  DeviceToken[]
+  blocksMade    Block[]        @relation("Blocker")
+  blocksGot     Block[]        @relation("Blocked")
+  convosAsA     Conversation[] @relation("ConvoA")
+  convosAsB     Conversation[] @relation("ConvoB")
+  sosAlerts     SosAlert[]
+  tickets       Ticket[]
+  notices       Notice[]
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Organization {
+  id          String   @id @default(uuid())
+  type        OrgType
+  name        String
+  description String?
+  address     String?
+  city        String?
+  state       String?
+  phone       String?
+  email       String?
+  logoUrl     String?
+  isVerified  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  memberships    Membership[]
+  passes         VisitorPass[]
+  products       Product[]
+  notices        Notice[]
+  sosAlerts      SosAlert[]
+  tickets        Ticket[]
+  emailCampaigns EmailCampaign[]
+
+  @@index([type, name])
+}
+
+model Membership {
+  id             String           @id @default(uuid())
+  userId         String
+  organizationId String
+  role           MembershipRole
+  status         MembershipStatus @default(PENDING)
+  unit           String? // house / flat number for estates
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId, status])
+}
+
+model VisitorPass {
+  id             String     @id @default(uuid())
+  code           String     @unique
+  organizationId String
+  hostId         String
+  visitorName    String
+  visitorPhone   String?
+  purpose        String?
+  validFrom      DateTime
+  validUntil     DateTime
+  maxEntries     Int        @default(1)
+  entriesUsed    Int        @default(0)
+  status         PassStatus @default(ACTIVE)
+  createdAt      DateTime   @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  host         User         @relation("PassHost", fields: [hostId], references: [id])
+  logs         GateLog[]
+
+  @@index([organizationId, status])
+  @@index([hostId])
+}
+
+model GateLog {
+  id         String     @id @default(uuid())
+  passId     String
+  securityId String
+  action     GateAction
+  createdAt  DateTime   @default(now())
+
+  pass     VisitorPass @relation(fields: [passId], references: [id], onDelete: Cascade)
+  security User        @relation(fields: [securityId], references: [id])
+
+  @@index([passId])
+}
+
+model Product {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  description    String?
+  price          Decimal  @db.Decimal(12, 2)
+  quantity       Int      @default(0)
+  unit           String?
+  imageUrl       String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  movements    StockMovement[]
+
+  @@index([organizationId, isActive])
+  @@index([name])
+}
+
+model StockMovement {
+  id            String   @id @default(uuid())
+  productId     String
+  delta         Int
+  quantityAfter Int
+  reason        String?
+  createdById   String
+  createdAt     DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, createdAt])
+}
+
+model Block {
+  id        String   @id @default(uuid())
+  blockerId String
+  blockedId String
+  createdAt DateTime @default(now())
+
+  blocker User @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+}
+
+// userAId < userBId always (sorted), so a pair has exactly one conversation
+model Conversation {
+  id          String             @id @default(uuid())
+  userAId     String
+  userBId     String
+  initiatorId String
+  status      ConversationStatus @default(ACTIVE)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  userA    User      @relation("ConvoA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB    User      @relation("ConvoB", fields: [userBId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@unique([userAId, userBId])
+  @@index([userAId])
+  @@index([userBId])
+}
+
+model Message {
+  id             String    @id @default(uuid())
+  conversationId String
+  senderId       String
+  body           String
+  readAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation(fields: [senderId], references: [id])
+
+  @@index([conversationId, createdAt])
+}
+
+model Notice {
+  id             String   @id @default(uuid())
+  organizationId String
+  authorId       String
+  title          String
+  body           String
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  author       User         @relation(fields: [authorId], references: [id])
+
+  @@index([organizationId, createdAt])
+}
+
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  title     String
+  body      String
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model DeviceToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  platform  String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model SosAlert {
+  id             String    @id @default(uuid())
+  organizationId String
+  userId         String
+  message        String?
+  status         SosStatus @default(OPEN)
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id])
+}
+
+model Ticket {
+  id             String       @id @default(uuid())
+  organizationId String
+  userId         String
+  title          String
+  description    String
+  status         TicketStatus @default(OPEN)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id])
+}
+
+model EmailCampaign {
+  id             String   @id @default(uuid())
+  organizationId String
+  senderId       String
+  subject        String
+  body           String
+  recipientCount Int
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}
