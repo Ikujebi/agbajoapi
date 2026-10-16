@@ -33,3 +33,8 @@ Chat:     GET /chat/conversations, /chat/requests, /chat/conversations/:id/messa
 
 ## Not built yet (schema exists for some)
 OTP verification, push notifications (DeviceToken), notices, SOS, tickets, dues/payments, super-admin tools, rate limiting, tests.
+
+## Added for the mobile app
+GET /users/search?q=            find people by name / exact phone (min 3 chars)
+GET /users/directory/:orgId     members of an org you belong to
+GET /users/notifications        POST /users/notifications/read-all
