@@ -2,11 +2,15 @@
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
+import helmet from 'helmet';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const config = app.get(ConfigService);
+
+  // Add HTTP security headers.
+  app.use(helmet());
 
   // Prefix all REST API routes with /api.
   app.setGlobalPrefix('api');
@@ -35,7 +39,7 @@ async function bootstrap() {
     }),
   );
 
-  // Allow NestJS to close resources gracefully.
+  // Allow graceful shutdown.
   app.enableShutdownHooks();
 
   const port = config.get<number>('PORT') ?? 3000;
@@ -44,4 +48,4 @@ async function bootstrap() {
   console.log(`API running on port ${port}`);
 }
 
-bootstrap();
+void bootstrap();
