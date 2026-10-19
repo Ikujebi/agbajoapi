@@ -4,93 +4,444 @@ generator client {
 
 datasource db {
   provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
 }
 
-enum OrgType { ESTATE SHOP CHURCH MOSQUE }
-enum MembershipRole { ORG_ADMIN SECURITY RESIDENT MEMBER STAFF }
-enum MembershipStatus { PENDING APPROVED REJECTED SUSPENDED }
-enum PassStatus { ACTIVE COMPLETED EXPIRED REVOKED }
-enum GateAction { ENTRY EXIT }
-enum ChatPrivacy { EVERYONE MY_ORGS_ONLY REQUEST_ONLY ADMINS_ONLY }
-enum ConversationStatus { ACTIVE REQUESTED DECLINED }
-enum TicketStatus { OPEN IN_PROGRESS RESOLVED CLOSED }
-enum SosStatus { OPEN ACKNOWLEDGED RESOLVED }
+enum OrgType {
+  ESTATE
+  SHOP
+  CHURCH
+  MOSQUE
+  ARTISAN
+  COMPANY
+  COMMUNITY_GROUP
+  OTHER
+}
+
+enum MembershipRole {
+  ORG_OWNER
+  ORG_ADMIN
+  MANAGER
+  SECURITY
+  RESIDENT
+  MEMBER
+  STAFF
+  ACCOUNTANT
+  MODERATOR
+}
+
+enum MembershipStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum PassStatus {
+  ACTIVE
+  COMPLETED
+  EXPIRED
+  REVOKED
+}
+
+enum GateAction {
+  ENTRY
+  EXIT
+  DENIED
+}
+
+enum ChatPrivacy {
+  EVERYONE
+  MY_ORGS_ONLY
+  REQUEST_ONLY
+  ADMINS_ONLY
+}
+
+enum ConversationStatus {
+  ACTIVE
+  REQUESTED
+  DECLINED
+  ARCHIVED
+}
+
+enum ConversationType {
+  DIRECT
+  GROUP
+  ORGANIZATION
+  SUPPORT
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum SosStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+  CANCELLED
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  OUT_OF_STOCK
+  ARCHIVED
+}
+
+enum StockMovementType {
+  RESTOCK
+  SALE
+  RETURN
+  DAMAGE
+  ADJUSTMENT
+  RESERVED
+  RELEASED
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  READY_FOR_PICKUP
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CARD
+  WALLET
+  USSD
+  OTHER
+}
+
+enum DeliveryStatus {
+  PENDING
+  ASSIGNED
+  PICKED_UP
+  IN_TRANSIT
+  DELIVERED
+  FAILED
+  CANCELLED
+}
+
+enum ExpenseCategory {
+  RENT
+  UTILITIES
+  SALARIES
+  STOCK_PURCHASE
+  DELIVERY
+  MARKETING
+  MAINTENANCE
+  TAX
+  EQUIPMENT
+  OTHER
+}
+
+enum ListingStatus {
+  DRAFT
+  ACTIVE
+  RESERVED
+  SOLD
+  REMOVED
+  EXPIRED
+}
+
+enum ListingCondition {
+  NEW
+  LIKE_NEW
+  GOOD
+  FAIR
+  FOR_PARTS
+}
+
+enum ServiceBookingStatus {
+  REQUESTED
+  ACCEPTED
+  DECLINED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ReviewStatus {
+  PENDING
+  PUBLISHED
+  HIDDEN
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWING
+  ACTIONED
+  DISMISSED
+}
+
+enum NoticeStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum EventStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+  COMPLETED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  EXCUSED
+  LATE
+}
+
+enum GivingType {
+  TITHE
+  OFFERING
+  DONATION
+  PLEDGE
+  OTHER
+}
+
+enum PledgeStatus {
+  OPEN
+  PARTIALLY_PAID
+  FULFILLED
+  CANCELLED
+}
+
+enum NotificationType {
+  GENERAL
+  ORDER
+  PAYMENT
+  VISITOR_PASS
+  CHAT
+  SERVICE_BOOKING
+  DELIVERY
+  SAFETY
+  EVENT
+  SYSTEM
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  REJECT
+  LOGIN
+  LOGOUT
+  ACCESS_GRANTED
+  ACCESS_DENIED
+  OTHER
+}
 
 model User {
-  id           String      @id @default(uuid())
-  fullName     String
-  email        String?     @unique
-  phone        String      @unique
-  passwordHash String
-  avatarUrl    String?
-  isSuperAdmin Boolean     @default(false)
-  isActive     Boolean     @default(true)
-  chatPrivacy  ChatPrivacy @default(EVERYONE)
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  id              String      @id @default(uuid())
+  fullName        String
+  email           String?     @unique
+  phone           String      @unique
+  passwordHash    String
+  avatarUrl       String?
+  bio             String?
+  isSuperAdmin    Boolean     @default(false)
+  isActive        Boolean     @default(true)
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+  chatPrivacy     ChatPrivacy @default(EVERYONE)
+  lastSeenAt      DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
 
-  refreshTokens RefreshToken[]
-  memberships   Membership[]
-  hostedPasses  VisitorPass[]  @relation("PassHost")
-  gateLogs      GateLog[]
-  sentMessages  Message[]
-  notifications Notification[]
-  deviceTokens  DeviceToken[]
-  blocksMade    Block[]        @relation("Blocker")
-  blocksGot     Block[]        @relation("Blocked")
-  convosAsA     Conversation[] @relation("ConvoA")
-  convosAsB     Conversation[] @relation("ConvoB")
-  sosAlerts     SosAlert[]
-  tickets       Ticket[]
-  notices       Notice[]
+  refreshTokens        RefreshToken[]
+  memberships          Membership[]
+  neighborhoodLinks    UserNeighborhood[]
+  hostedPasses         VisitorPass[]        @relation("PassHost")
+  gateLogs             GateLog[]            @relation("GateSecurity")
+  sentMessages         Message[]
+  notifications        Notification[]
+  deviceTokens         DeviceToken[]
+  blocksMade           Block[]              @relation("Blocker")
+  blocksGot            Block[]              @relation("Blocked")
+  conversationsA       Conversation[]       @relation("ConvoA")
+  conversationsB       Conversation[]       @relation("ConvoB")
+  conversationLinks    ConversationMember[]
+  sosAlerts            SosAlert[]
+  tickets              Ticket[]             @relation("TicketCreator")
+  noticesAuthored      Notice[]             @relation("NoticeAuthor")
+  listings             MarketplaceListing[] @relation("ListingSeller")
+  listingInquiries     ListingInquiry[]
+  serviceProfile       ArtisanProfile?
+  serviceBookings      ServiceBooking[]     @relation("BookingCustomer")
+  reviewsWritten       Review[]             @relation("ReviewAuthor")
+  reviewsReceived      Review[]             @relation("ReviewTarget")
+  orders               Order[]              @relation("CustomerOrders")
+  deliveriesAssigned   Delivery[]           @relation("DeliveryAgent")
+  expensesRecorded     Expense[]            @relation("ExpenseRecorder")
+  paymentsReceived     Payment[]            @relation("PaymentPayer")
+  churchProfiles       ChurchMember[]
+  eventRegistrations   EventRegistration[]
+  attendancesMarked    Attendance[]         @relation("AttendanceMarker")
+  auditLogs            AuditLog[]           @relation("AuditActor")
+  reportsFiled         Report[]             @relation("ReportReporter")
+  reportsAssigned      Report[]             @relation("ReportAssignee")
+  emailCampaigns       EmailCampaign[]      @relation("CampaignSender")
+  ownedUnits           EstateUnit[]         @relation("UnitOwner")
+  unitOccupancies      UnitOccupancy[]
+  visitorPassesCreated VisitorPass[]        @relation("PassCreator")
+  inventoryMovements   StockMovement[]      @relation("StockMovementCreator")
+  organizationPayments OrganizationPayout[] @relation("PayoutRecipient")
 }
 
 model RefreshToken {
-  id        String   @id @default(uuid())
+  id        String    @id @default(uuid())
   userId    String
-  tokenHash String   @unique
+  tokenHash String    @unique
   expiresAt DateTime
-  createdAt DateTime @default(now())
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([expiresAt])
+}
+
+model Neighborhood {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  description String?
+  city        String
+  state       String
+  country     String   @default("Nigeria")
+  postalCode  String?
+  latitude    Decimal? @db.Decimal(10, 7)
+  longitude   Decimal? @db.Decimal(10, 7)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  organizationLinks OrganizationNeighborhood[]
+  userLinks         UserNeighborhood[]
+  listings          MarketplaceListing[]
+  serviceBookings   ServiceBooking[]
+
+  @@index([city, state])
+  @@index([name, city])
+}
+
+model UserNeighborhood {
+  id             String   @id @default(uuid())
+  userId         String
+  neighborhoodId String
+  isPrimary      Boolean  @default(false)
+  joinedAt       DateTime @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  neighborhood Neighborhood @relation(fields: [neighborhoodId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, neighborhoodId])
+  @@index([neighborhoodId])
 }
 
 model Organization {
   id          String   @id @default(uuid())
   type        OrgType
   name        String
+  slug        String?  @unique
   description String?
   address     String?
   city        String?
   state       String?
+  country     String   @default("Nigeria")
+  latitude    Decimal? @db.Decimal(10, 7)
+  longitude   Decimal? @db.Decimal(10, 7)
   phone       String?
   email       String?
+  website     String?
   logoUrl     String?
+  coverUrl    String?
   isVerified  Boolean  @default(false)
+  isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  memberships    Membership[]
-  passes         VisitorPass[]
-  products       Product[]
-  notices        Notice[]
-  sosAlerts      SosAlert[]
-  tickets        Ticket[]
-  emailCampaigns EmailCampaign[]
+  memberships       Membership[]
+  neighborhoodLinks OrganizationNeighborhood[]
+  passes            VisitorPass[]
+  gateLogs          GateLog[]
+  estateUnits       EstateUnit[]
+  products          Product[]
+  orders            Order[]
+  notices           Notice[]
+  sosAlerts         SosAlert[]
+  tickets           Ticket[]
+  emailCampaigns    EmailCampaign[]
+  expenses          Expense[]
+  payouts           OrganizationPayout[]
+  listings          MarketplaceListing[]
+  artisanProfile    ArtisanProfile?
+  services          ArtisanService[]
+  serviceBookings   ServiceBooking[]
+  reviews           Review[]                   @relation("OrganizationReviews")
+  churchMembers     ChurchMember[]
+  churchDepartments ChurchDepartment[]
+  events            Event[]
+  attendances       Attendance[]
+  givingRecords     GivingRecord[]
+  pledges           Pledge[]
+  conversations     Conversation[]
+  reports           Report[]
+  auditLogs         AuditLog[]
+  deliveries        Delivery[]
+  paymentRecords    Payment[]
 
   @@index([type, name])
+  @@index([city, state])
+  @@index([isVerified, isActive])
+}
+
+model OrganizationNeighborhood {
+  id             String   @id @default(uuid())
+  organizationId String
+  neighborhoodId String
+  isPrimary      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  neighborhood Neighborhood @relation(fields: [neighborhoodId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, neighborhoodId])
+  @@index([neighborhoodId])
 }
 
 model Membership {
   id             String           @id @default(uuid())
   userId         String
   organizationId String
-  role           MembershipRole
+  role           MembershipRole   @default(MEMBER)
   status         MembershipStatus @default(PENDING)
-  unit           String? // house / flat number for estates
+  unit           String?
+  title          String?
+  joinedAt       DateTime?
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 
@@ -99,15 +450,53 @@ model Membership {
 
   @@unique([userId, organizationId])
   @@index([organizationId, status])
+  @@index([userId, status])
+}
+
+model EstateUnit {
+  id             String   @id @default(uuid())
+  organizationId String
+  unitNumber     String
+  building       String?
+  unitType       String?
+  ownerId        String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  owner        User?           @relation("UnitOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  occupancies  UnitOccupancy[]
+
+  @@unique([organizationId, unitNumber])
+  @@index([ownerId])
+}
+
+model UnitOccupancy {
+  id           String    @id @default(uuid())
+  estateUnitId String
+  userId       String
+  isPrimary    Boolean   @default(false)
+  startAt      DateTime  @default(now())
+  endAt        DateTime?
+  createdAt    DateTime  @default(now())
+
+  estateUnit EstateUnit @relation(fields: [estateUnitId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([estateUnitId, endAt])
+  @@index([userId, endAt])
 }
 
 model VisitorPass {
   id             String     @id @default(uuid())
-  code           String     @unique
+  codeHash       String     @unique
   organizationId String
   hostId         String
+  createdById    String?
   visitorName    String
   visitorPhone   String?
+  visitorEmail   String?
   purpose        String?
   validFrom      DateTime
   validUntil     DateTime
@@ -115,60 +504,371 @@ model VisitorPass {
   entriesUsed    Int        @default(0)
   status         PassStatus @default(ACTIVE)
   createdAt      DateTime   @default(now())
+  revokedAt      DateTime?
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   host         User         @relation("PassHost", fields: [hostId], references: [id])
+  createdBy    User?        @relation("PassCreator", fields: [createdById], references: [id], onDelete: SetNull)
   logs         GateLog[]
 
-  @@index([organizationId, status])
+  @@index([organizationId, status, validUntil])
   @@index([hostId])
 }
 
 model GateLog {
-  id         String     @id @default(uuid())
-  passId     String
-  securityId String
-  action     GateAction
-  createdAt  DateTime   @default(now())
+  id             String     @id @default(uuid())
+  passId         String?
+  organizationId String
+  securityId     String
+  action         GateAction
+  visitorName    String?
+  notes          String?
+  createdAt      DateTime   @default(now())
 
-  pass     VisitorPass @relation(fields: [passId], references: [id], onDelete: Cascade)
-  security User        @relation(fields: [securityId], references: [id])
+  pass         VisitorPass? @relation(fields: [passId], references: [id], onDelete: SetNull)
+  security     User         @relation("GateSecurity", fields: [securityId], references: [id])
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
+  @@index([organizationId, createdAt])
   @@index([passId])
 }
 
 model Product {
-  id             String   @id @default(uuid())
+  id             String        @id @default(uuid())
   organizationId String
   name           String
+  slug           String?
   description    String?
-  price          Decimal  @db.Decimal(12, 2)
-  quantity       Int      @default(0)
+  sku            String?
+  price          Decimal       @db.Decimal(12, 2)
+  costPrice      Decimal?      @db.Decimal(12, 2)
+  quantity       Int           @default(0)
+  reservedQty    Int           @default(0)
+  lowStockAt     Int           @default(5)
   unit           String?
   imageUrl       String?
-  isActive       Boolean  @default(true)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  status         ProductStatus @default(ACTIVE)
+  isAvailable    Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   movements    StockMovement[]
+  orderItems   OrderItem[]
+  images       ProductImage[]
 
-  @@index([organizationId, isActive])
+  @@unique([organizationId, sku])
+  @@index([organizationId, status])
   @@index([name])
 }
 
-model StockMovement {
-  id            String   @id @default(uuid())
-  productId     String
-  delta         Int
-  quantityAfter Int
-  reason        String?
-  createdById   String
-  createdAt     DateTime @default(now())
+model ProductImage {
+  id        String   @id @default(uuid())
+  productId String
+  url       String
+  altText   String?
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
 
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
+  @@index([productId, sortOrder])
+}
+
+model StockMovement {
+  id            String            @id @default(uuid())
+  productId     String
+  createdById   String?
+  type          StockMovementType
+  delta         Int
+  quantityAfter Int
+  reason        String?
+  reference     String?
+  createdAt     DateTime          @default(now())
+
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdBy User?   @relation("StockMovementCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
   @@index([productId, createdAt])
+  @@index([createdById])
+}
+
+model Order {
+  id              String      @id @default(uuid())
+  orderNumber     String      @unique
+  organizationId  String
+  customerId      String
+  status          OrderStatus @default(PENDING)
+  currency        String      @default("NGN")
+  subtotal        Decimal     @db.Decimal(12, 2)
+  deliveryFee     Decimal     @default(0) @db.Decimal(12, 2)
+  discountAmount  Decimal     @default(0) @db.Decimal(12, 2)
+  taxAmount       Decimal     @default(0) @db.Decimal(12, 2)
+  totalAmount     Decimal     @db.Decimal(12, 2)
+  customerName    String
+  customerPhone   String
+  deliveryAddress String?
+  deliveryNotes   String?
+  placedAt        DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  cancelledAt     DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  customer     User         @relation("CustomerOrders", fields: [customerId], references: [id])
+  items        OrderItem[]
+  payments     Payment[]
+  delivery     Delivery?
+
+  @@index([organizationId, status, placedAt])
+  @@index([customerId, placedAt])
+}
+
+model OrderItem {
+  id          String  @id @default(uuid())
+  orderId     String
+  productId   String?
+  productName String
+  sku         String?
+  quantity    Int
+  unitPrice   Decimal @db.Decimal(12, 2)
+  lineTotal   Decimal @db.Decimal(12, 2)
+
+  order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model Payment {
+  id             String        @id @default(uuid())
+  organizationId String?
+  orderId        String?
+  payerId        String?
+  amount         Decimal       @db.Decimal(12, 2)
+  currency       String        @default("NGN")
+  method         PaymentMethod
+  status         PaymentStatus @default(PENDING)
+  provider       String?
+  providerRef    String?       @unique
+  idempotencyKey String?       @unique
+  paidAt         DateTime?
+  refundedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  order        Order?        @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  payer        User?         @relation("PaymentPayer", fields: [payerId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status, createdAt])
+  @@index([orderId])
+  @@index([payerId, createdAt])
+}
+
+model Expense {
+  id             String          @id @default(uuid())
+  organizationId String
+  recordedById   String?
+  category       ExpenseCategory @default(OTHER)
+  description    String
+  amount         Decimal         @db.Decimal(12, 2)
+  currency       String          @default("NGN")
+  incurredAt     DateTime        @default(now())
+  receiptUrl     String?
+  reference      String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  recordedBy   User?        @relation("ExpenseRecorder", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, incurredAt])
+  @@index([organizationId, category])
+}
+
+model OrganizationPayout {
+  id             String    @id @default(uuid())
+  organizationId String
+  recipientId    String?
+  amount         Decimal   @db.Decimal(12, 2)
+  currency       String    @default("NGN")
+  reference      String?   @unique
+  description    String?
+  paidAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  recipient    User?        @relation("PayoutRecipient", fields: [recipientId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+}
+
+model MarketplaceCategory {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  slug      String   @unique
+  parentId  String?
+  createdAt DateTime @default(now())
+
+  parent   MarketplaceCategory?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children MarketplaceCategory[] @relation("CategoryTree")
+  listings MarketplaceListing[]
+}
+
+model MarketplaceListing {
+  id             String           @id @default(uuid())
+  sellerId       String
+  organizationId String?
+  neighborhoodId String?
+  categoryId     String?
+  title          String
+  description    String
+  price          Decimal          @db.Decimal(12, 2)
+  currency       String           @default("NGN")
+  condition      ListingCondition @default(GOOD)
+  status         ListingStatus    @default(ACTIVE)
+  isNegotiable   Boolean          @default(true)
+  locationText   String?
+  expiresAt      DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  seller       User                 @relation("ListingSeller", fields: [sellerId], references: [id])
+  organization Organization?        @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  neighborhood Neighborhood?        @relation(fields: [neighborhoodId], references: [id], onDelete: SetNull)
+  category     MarketplaceCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  images       ListingImage[]
+  inquiries    ListingInquiry[]
+  reviews      Review[]
+
+  @@index([neighborhoodId, status, createdAt])
+  @@index([categoryId, status])
+  @@index([sellerId, status])
+  @@index([price])
+}
+
+model ListingImage {
+  id        String  @id @default(uuid())
+  listingId String
+  url       String
+  altText   String?
+  sortOrder Int     @default(0)
+
+  listing MarketplaceListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([listingId, sortOrder])
+}
+
+model ListingInquiry {
+  id        String   @id @default(uuid())
+  listingId String
+  userId    String
+  message   String
+  createdAt DateTime @default(now())
+
+  listing MarketplaceListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  user    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([listingId, createdAt])
+  @@index([userId, createdAt])
+}
+
+model ArtisanProfile {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  organizationId  String?  @unique
+  headline        String?
+  bio             String?
+  yearsExperience Int?
+  serviceArea     String?
+  isVerified      Boolean  @default(false)
+  averageRating   Decimal? @db.Decimal(3, 2)
+  completedJobs   Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization?    @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  services     ArtisanService[]
+  bookings     ServiceBooking[]
+
+  @@index([isVerified, averageRating])
+}
+
+model ArtisanService {
+  id               String   @id @default(uuid())
+  artisanProfileId String
+  organizationId   String?
+  name             String
+  description      String?
+  basePrice        Decimal? @db.Decimal(12, 2)
+  currency         String   @default("NGN")
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  artisanProfile ArtisanProfile   @relation(fields: [artisanProfileId], references: [id], onDelete: Cascade)
+  organization   Organization?    @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  bookings       ServiceBooking[]
+
+  @@index([artisanProfileId, isActive])
+  @@index([organizationId, isActive])
+}
+
+model ServiceBooking {
+  id               String               @id @default(uuid())
+  serviceId        String
+  artisanProfileId String
+  customerId       String
+  organizationId   String?
+  neighborhoodId   String?
+  status           ServiceBookingStatus @default(REQUESTED)
+  description      String?
+  requestedAt      DateTime             @default(now())
+  scheduledAt      DateTime?
+  completedAt      DateTime?
+  quotedPrice      Decimal?             @db.Decimal(12, 2)
+  finalPrice       Decimal?             @db.Decimal(12, 2)
+  address          String?
+  customerPhone    String?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  service      ArtisanService @relation(fields: [serviceId], references: [id])
+  artisan      ArtisanProfile @relation(fields: [artisanProfileId], references: [id])
+  customer     User           @relation("BookingCustomer", fields: [customerId], references: [id])
+  organization Organization?  @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  neighborhood Neighborhood?  @relation(fields: [neighborhoodId], references: [id], onDelete: SetNull)
+  review       Review?
+
+  @@index([artisanProfileId, status, requestedAt])
+  @@index([customerId, requestedAt])
+  @@index([neighborhoodId, status])
+}
+
+model Review {
+  id               String       @id @default(uuid())
+  authorId         String
+  targetUserId     String?
+  organizationId   String?
+  listingId        String?
+  serviceBookingId String?      @unique
+  rating           Int
+  comment          String?
+  status           ReviewStatus @default(PENDING)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  author         User                @relation("ReviewAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  targetUser     User?               @relation("ReviewTarget", fields: [targetUserId], references: [id], onDelete: SetNull)
+  organization   Organization?       @relation("OrganizationReviews", fields: [organizationId], references: [id], onDelete: SetNull)
+  listing        MarketplaceListing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+  serviceBooking ServiceBooking?     @relation(fields: [serviceBookingId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status, createdAt])
+  @@index([targetUserId, status])
+  @@index([listingId])
 }
 
 model Block {
@@ -181,25 +881,47 @@ model Block {
   blocked User @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
 
   @@unique([blockerId, blockedId])
+  @@index([blockedId])
 }
 
-// userAId < userBId always (sorted), so a pair has exactly one conversation
 model Conversation {
-  id          String             @id @default(uuid())
-  userAId     String
-  userBId     String
-  initiatorId String
-  status      ConversationStatus @default(ACTIVE)
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
+  id             String             @id @default(uuid())
+  type           ConversationType   @default(DIRECT)
+  userAId        String?
+  userBId        String?
+  organizationId String?
+  title          String?
+  status         ConversationStatus @default(ACTIVE)
+  initiatorId    String
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
 
-  userA    User      @relation("ConvoA", fields: [userAId], references: [id], onDelete: Cascade)
-  userB    User      @relation("ConvoB", fields: [userBId], references: [id], onDelete: Cascade)
-  messages Message[]
+  userA        User?                @relation("ConvoA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB        User?                @relation("ConvoB", fields: [userBId], references: [id], onDelete: Cascade)
+  organization Organization?        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members      ConversationMember[]
+  messages     Message[]
 
   @@unique([userAId, userBId])
+  @@index([organizationId, updatedAt])
   @@index([userAId])
   @@index([userBId])
+}
+
+model ConversationMember {
+  id             String    @id @default(uuid())
+  conversationId String
+  userId         String
+  joinedAt       DateTime  @default(now())
+  lastReadAt     DateTime?
+  mutedAt        DateTime?
+  leftAt         DateTime?
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId, leftAt])
 }
 
 model Message {
@@ -207,40 +929,50 @@ model Message {
   conversationId String
   senderId       String
   body           String
-  readAt         DateTime?
+  attachmentUrl  String?
+  attachmentType String?
+  editedAt       DateTime?
+  deletedAt      DateTime?
   createdAt      DateTime  @default(now())
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User         @relation(fields: [senderId], references: [id])
 
   @@index([conversationId, createdAt])
+  @@index([senderId, createdAt])
 }
 
 model Notice {
-  id             String   @id @default(uuid())
+  id             String       @id @default(uuid())
   organizationId String
   authorId       String
   title          String
   body           String
-  createdAt      DateTime @default(now())
+  status         NoticeStatus @default(PUBLISHED)
+  publishedAt    DateTime?
+  expiresAt      DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  author       User         @relation(fields: [authorId], references: [id])
+  author       User         @relation("NoticeAuthor", fields: [authorId], references: [id])
 
-  @@index([organizationId, createdAt])
+  @@index([organizationId, status, createdAt])
 }
 
 model Notification {
-  id        String    @id @default(uuid())
+  id        String           @id @default(uuid())
   userId    String
+  type      NotificationType @default(GENERAL)
   title     String
   body      String
+  data      Json?
   readAt    DateTime?
-  createdAt DateTime  @default(now())
+  createdAt DateTime         @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId, createdAt])
+  @@index([userId, readAt, createdAt])
 }
 
 model DeviceToken {
@@ -249,8 +981,11 @@ model DeviceToken {
   token     String   @unique
   platform  String
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model SosAlert {
@@ -258,11 +993,19 @@ model SosAlert {
   organizationId String
   userId         String
   message        String?
+  latitude       Decimal?  @db.Decimal(10, 7)
+  longitude      Decimal?  @db.Decimal(10, 7)
   status         SosStatus @default(OPEN)
+  acknowledgedAt DateTime?
+  resolvedAt     DateTime?
   createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user         User         @relation(fields: [userId], references: [id])
+
+  @@index([organizationId, status, createdAt])
+  @@index([userId, createdAt])
 }
 
 model Ticket {
@@ -272,21 +1015,248 @@ model Ticket {
   title          String
   description    String
   status         TicketStatus @default(OPEN)
+  priority       Int          @default(3)
+  resolvedAt     DateTime?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user         User         @relation(fields: [userId], references: [id])
+  user         User         @relation("TicketCreator", fields: [userId], references: [id])
+
+  @@index([organizationId, status, createdAt])
+  @@index([userId, createdAt])
 }
 
 model EmailCampaign {
-  id             String   @id @default(uuid())
+  id             String    @id @default(uuid())
   organizationId String
   senderId       String
   subject        String
   body           String
-  recipientCount Int
-  createdAt      DateTime @default(now())
+  recipientCount Int       @default(0)
+  sentAt         DateTime?
+  createdAt      DateTime  @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sender       User         @relation("CampaignSender", fields: [senderId], references: [id])
+
+  @@index([organizationId, createdAt])
+}
+
+model ChurchMember {
+  id             String    @id @default(uuid())
+  userId         String
+  organizationId String
+  memberNumber   String?
+  joinedAt       DateTime?
+  dateOfBirth    DateTime?
+  emergencyName  String?
+  emergencyPhone String?
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user          User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization  Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  departments   ChurchDepartmentMember[]
+  attendances   Attendance[]
+  giving        GivingRecord[]
+  pledges       Pledge[]
+  registrations EventRegistration[]
+
+  @@unique([userId, organizationId])
+  @@unique([organizationId, memberNumber])
+  @@index([organizationId, isActive])
+}
+
+model ChurchDepartment {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  description    String?
+  leaderName     String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  organization Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members      ChurchDepartmentMember[]
+
+  @@unique([organizationId, name])
+}
+
+model ChurchDepartmentMember {
+  id                 String   @id @default(uuid())
+  churchMemberId     String
+  churchDepartmentId String
+  role               String?
+  joinedAt           DateTime @default(now())
+
+  churchMember     ChurchMember     @relation(fields: [churchMemberId], references: [id], onDelete: Cascade)
+  churchDepartment ChurchDepartment @relation(fields: [churchDepartmentId], references: [id], onDelete: Cascade)
+
+  @@unique([churchMemberId, churchDepartmentId])
+  @@index([churchDepartmentId])
+}
+
+model Event {
+  id             String      @id @default(uuid())
+  organizationId String
+  title          String
+  description    String?
+  location       String?
+  startsAt       DateTime
+  endsAt         DateTime?
+  status         EventStatus @default(DRAFT)
+  capacity       Int?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  organization  Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  registrations EventRegistration[]
+  attendances   Attendance[]
+
+  @@index([organizationId, startsAt, status])
+}
+
+model EventRegistration {
+  id             String    @id @default(uuid())
+  eventId        String
+  userId         String
+  churchMemberId String?
+  registeredAt   DateTime  @default(now())
+  checkedInAt    DateTime?
+
+  event        Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  churchMember ChurchMember? @relation(fields: [churchMemberId], references: [id], onDelete: SetNull)
+
+  @@unique([eventId, userId])
+  @@index([userId])
+}
+
+model Attendance {
+  id             String           @id @default(uuid())
+  organizationId String
+  eventId        String?
+  churchMemberId String?
+  markedById     String?
+  date           DateTime         @default(now())
+  status         AttendanceStatus @default(PRESENT)
+  notes          String?
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  event        Event?        @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  churchMember ChurchMember? @relation(fields: [churchMemberId], references: [id], onDelete: SetNull)
+  markedBy     User?         @relation("AttendanceMarker", fields: [markedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, date])
+  @@index([churchMemberId, date])
+}
+
+model GivingRecord {
+  id             String     @id @default(uuid())
+  organizationId String
+  churchMemberId String?
+  type           GivingType @default(OFFERING)
+  amount         Decimal    @db.Decimal(12, 2)
+  currency       String     @default("NGN")
+  reference      String?    @unique
+  isAnonymous    Boolean    @default(false)
+  receivedAt     DateTime   @default(now())
+  notes          String?
+  createdAt      DateTime   @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  churchMember ChurchMember? @relation(fields: [churchMemberId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, receivedAt])
+  @@index([churchMemberId, receivedAt])
+}
+
+model Pledge {
+  id             String       @id @default(uuid())
+  organizationId String
+  churchMemberId String?
+  title          String
+  targetAmount   Decimal      @db.Decimal(12, 2)
+  amountPaid     Decimal      @default(0) @db.Decimal(12, 2)
+  status         PledgeStatus @default(OPEN)
+  dueAt          DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  churchMember ChurchMember? @relation(fields: [churchMemberId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+}
+
+model Delivery {
+  id              String         @id @default(uuid())
+  orderId         String         @unique
+  organizationId  String
+  assignedAgentId String?
+  status          DeliveryStatus @default(PENDING)
+  trackingCode    String?        @unique
+  pickupAddress   String?
+  deliveryAddress String
+  recipientName   String
+  recipientPhone  String
+  assignedAt      DateTime?
+  pickedUpAt      DateTime?
+  deliveredAt     DateTime?
+  failedReason    String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  order         Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  assignedAgent User?        @relation("DeliveryAgent", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status, createdAt])
+  @@index([assignedAgentId, status])
+}
+
+model Report {
+  id             String       @id @default(uuid())
+  reporterId     String
+  organizationId String?
+  assigneeId     String?
+  targetType     String
+  targetId       String
+  reason         String
+  details        String?
+  status         ReportStatus @default(OPEN)
+  resolutionNote String?
+  resolvedAt     DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  reporter     User          @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  assignee     User?         @relation("ReportAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([targetType, targetId])
+  @@index([organizationId, status])
+}
+
+model AuditLog {
+  id             String      @id @default(uuid())
+  actorId        String?
+  organizationId String?
+  action         AuditAction
+  entityType     String
+  entityId       String?
+  ipAddress      String?
+  userAgent      String?
+  metadata       Json?
+  createdAt      DateTime    @default(now())
+
+  actor        User?         @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([entityType, entityId])
 }

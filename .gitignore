@@ -62,3 +62,5 @@ Thumbs.db
 # ==========================================
 /.eslintcache
 /.swc
+node_modules/
+dist/

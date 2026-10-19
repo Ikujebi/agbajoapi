@@ -1,87 +1,265 @@
-import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+
+import {
+  ConflictException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { createHash, randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoginDto, RegisterDto } from './dto';
 
 const userSelect = {
-  id: true, fullName: true, email: true, phone: true, avatarUrl: true,
-  chatPrivacy: true, isSuperAdmin: true, createdAt: true,
+  id: true,
+  fullName: true,
+  email: true,
+  phone: true,
+  avatarUrl: true,
+  chatPrivacy: true,
+  isSuperAdmin: true,
+  createdAt: true,
 } as const;
+
+const REFRESH_TOKEN_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+
+interface RefreshPayload {
+  sub: string;
+  jti: string;
+}
 
 @Injectable()
 export class AuthService {
-  constructor(private prisma: PrismaService, private jwt: JwtService, private config: ConfigService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwt: JwtService,
+    private readonly config: ConfigService,
+  ) {}
 
-  private hash(t: string) {
-    return createHash('sha256').update(t).digest('hex');
+  private hash(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
   }
 
   private async issueTokens(userId: string) {
+    const accessSecret =
+      this.config.getOrThrow<string>('JWT_ACCESS_SECRET');
+    const refreshSecret =
+      this.config.getOrThrow<string>('JWT_REFRESH_SECRET');
+
     const accessToken = await this.jwt.signAsync(
       { sub: userId },
-      { secret: this.config.getOrThrow('JWT_ACCESS_SECRET'), expiresIn: '15m' },
+      {
+        secret: accessSecret,
+        expiresIn: '15m',
+      },
     );
+
     const refreshToken = await this.jwt.signAsync(
-      { sub: userId, jti: randomUUID() },
-      { secret: this.config.getOrThrow('JWT_REFRESH_SECRET'), expiresIn: '30d' },
+      {
+        sub: userId,
+        jti: randomUUID(),
+      },
+      {
+        secret: refreshSecret,
+        expiresIn: '30d',
+      },
     );
+
     await this.prisma.refreshToken.create({
-      data: { userId, tokenHash: this.hash(refreshToken), expiresAt: new Date(Date.now() + 30 * 86400000) },
+      data: {
+        userId,
+        tokenHash: this.hash(refreshToken),
+        expiresAt: new Date(
+          Date.now() + REFRESH_TOKEN_LIFETIME_MS,
+        ),
+      },
     });
-    return { accessToken, refreshToken };
+
+    return {
+      accessToken,
+      refreshToken,
+    };
   }
 
   async register(dto: RegisterDto) {
+    const phone = dto.phone.trim();
+    const email = dto.email?.trim().toLowerCase() || undefined;
+
     const exists = await this.prisma.user.findFirst({
-      where: { OR: [{ phone: dto.phone }, ...(dto.email ? [{ email: dto.email.toLowerCase() }] : [])] },
-    });
-    if (exists) throw new ConflictException('Phone or email already registered');
-    const user = await this.prisma.user.create({
-      data: {
-        fullName: dto.fullName,
-        phone: dto.phone,
-        email: dto.email?.toLowerCase(),
-        passwordHash: await bcrypt.hash(dto.password, 10),
+      where: {
+        OR: [
+          { phone },
+          ...(email ? [{ email }] : []),
+        ],
       },
-      select: userSelect,
+      select: { id: true },
     });
-    return { user, ...(await this.issueTokens(user.id)) };
+
+    if (exists) {
+      throw new ConflictException(
+        'Phone or email already registered',
+      );
+    }
+
+    try {
+      const user = await this.prisma.user.create({
+        data: {
+          fullName: dto.fullName.trim(),
+          phone,
+          ...(email ? { email } : {}),
+          passwordHash: await bcrypt.hash(dto.password, 10),
+        },
+        select: userSelect,
+      });
+
+      const tokens = await this.issueTokens(user.id);
+
+      return {
+        user,
+        ...tokens,
+      };
+    } catch (error) {
+      // The database unique constraints remain the final protection
+      // against simultaneous registrations with the same details.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'Phone or email already registered',
+        );
+      }
+
+      throw error;
+    }
   }
 
   async login(dto: LoginDto) {
-    const id = dto.identifier.trim();
+    const identifier = dto.identifier.trim();
+
     const user = await this.prisma.user.findFirst({
-      where: id.includes('@') ? { email: id.toLowerCase() } : { phone: id },
+      where: identifier.includes('@')
+        ? { email: identifier.toLowerCase() }
+        : { phone: identifier },
     });
-    if (!user || !user.isActive || !(await bcrypt.compare(dto.password, user.passwordHash))) {
+
+    if (
+      !user ||
+      !user.isActive ||
+      !(await bcrypt.compare(dto.password, user.passwordHash))
+    ) {
       throw new UnauthorizedException('Invalid credentials');
     }
-    const { passwordHash, ...safe } = user;
-    return { user: safe, ...(await this.issueTokens(user.id)) };
+
+    const { passwordHash: _passwordHash, ...safeUser } = user;
+    const tokens = await this.issueTokens(user.id);
+
+    return {
+      user: safeUser,
+      ...tokens,
+    };
   }
 
   async refresh(refreshToken: string) {
-    let payload: { sub: string };
+    if (
+      typeof refreshToken !== 'string' ||
+      refreshToken.trim().length === 0
+    ) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    let payload: RefreshPayload;
+
     try {
-      payload = await this.jwt.verifyAsync(refreshToken, { secret: this.config.getOrThrow('JWT_REFRESH_SECRET') });
+      payload = await this.jwt.verifyAsync<RefreshPayload>(
+        refreshToken,
+        {
+          secret: this.config.getOrThrow<string>(
+            'JWT_REFRESH_SECRET',
+          ),
+        },
+      );
     } catch {
       throw new UnauthorizedException('Invalid refresh token');
     }
-    const stored = await this.prisma.refreshToken.findUnique({ where: { tokenHash: this.hash(refreshToken) } });
-    if (!stored || stored.expiresAt < new Date()) throw new UnauthorizedException('Invalid refresh token');
-    await this.prisma.refreshToken.delete({ where: { id: stored.id } }); // rotation
+
+    if (
+      !payload ||
+      typeof payload.sub !== 'string' ||
+      !payload.sub ||
+      typeof payload.jti !== 'string' ||
+      !payload.jti
+    ) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    const tokenHash = this.hash(refreshToken);
+
+    const stored = await this.prisma.refreshToken.findUnique({
+      where: { tokenHash },
+    });
+
+    if (!stored || stored.expiresAt <= new Date()) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    if (stored.userId !== payload.sub) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: {
+        id: true,
+        isActive: true,
+      },
+    });
+
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
+    // Delete conditionally so concurrent refresh attempts cannot
+    // both successfully rotate the same stored token.
+    const deleted = await this.prisma.refreshToken.deleteMany({
+      where: {
+        id: stored.id,
+        tokenHash,
+        userId: payload.sub,
+        expiresAt: { gt: new Date() },
+      },
+    });
+
+    if (deleted.count !== 1) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+
     return this.issueTokens(payload.sub);
   }
 
   async logout(refreshToken: string) {
-    await this.prisma.refreshToken.deleteMany({ where: { tokenHash: this.hash(refreshToken) } });
+    if (
+      typeof refreshToken !== 'string' ||
+      refreshToken.trim().length === 0
+    ) {
+      return { ok: true };
+    }
+
+    await this.prisma.refreshToken.deleteMany({
+      where: {
+        tokenHash: this.hash(refreshToken),
+      },
+    });
+
     return { ok: true };
   }
 
-  me(userId: string) {
-    return this.prisma.user.findUnique({ where: { id: userId }, select: userSelect });
+  async me(userId: string) {
+    return this.prisma.user.findUnique({
+      where: { id: userId },
+      select: userSelect,
+    });
   }
 }

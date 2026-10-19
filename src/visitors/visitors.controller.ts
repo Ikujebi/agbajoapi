@@ -1,19 +1,69 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
-import { AuthUser, CurrentUser } from '../common/decorators/current-user.decorator';
+import {
+  AuthUser,
+  CurrentUser,
+} from '../common/decorators/current-user.decorator';
 import { VisitorsService } from './visitors.service';
 import { CreatePassDto, VerifyPassDto } from './dto';
 
 @UseGuards(JwtAuthGuard)
 @Controller('visitors')
 export class VisitorsController {
-  constructor(private visitors: VisitorsService) {}
+  constructor(private readonly visitorsService: VisitorsService) {}
 
-  @Post() create(@CurrentUser() u: AuthUser, @Body() dto: CreatePassDto) { return this.visitors.create(u.id, dto); }
-  @Get('mine') mine(@CurrentUser() u: AuthUser) { return this.visitors.mine(u.id); }
-  @Patch(':id/revoke') revoke(@CurrentUser() u: AuthUser, @Param('id') id: string) { return this.visitors.revoke(u.id, id); }
+  @Post()
+  create(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreatePassDto,
+  ) {
+    return this.visitorsService.create(user.id, dto);
+  }
 
-  @Post('verify') verify(@CurrentUser() u: AuthUser, @Body() dto: VerifyPassDto) { return this.visitors.verify(u.id, dto); }
-  @Post('exit') exit(@CurrentUser() u: AuthUser, @Body() dto: VerifyPassDto) { return this.visitors.exit(u.id, dto); }
-  @Get('log/:organizationId') log(@CurrentUser() u: AuthUser, @Param('organizationId') id: string) { return this.visitors.gateLog(u.id, id); }
+  @Get('mine')
+  mine(@CurrentUser() user: AuthUser) {
+    return this.visitorsService.mine(user.id);
+  }
+
+  @Patch(':id/revoke')
+  revoke(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+  ) {
+    return this.visitorsService.revoke(user.id, id);
+  }
+
+  @Post('verify')
+  verify(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: VerifyPassDto,
+  ) {
+    return this.visitorsService.verify(user.id, dto);
+  }
+
+  @Post('exit')
+  exit(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: VerifyPassDto,
+  ) {
+    return this.visitorsService.exit(user.id, dto);
+  }
+
+  @Get('log/:organizationId')
+  log(
+    @CurrentUser() user: AuthUser,
+    @Param('organizationId') organizationId: string,
+  ) {
+    return this.visitorsService.gateLog(user.id, organizationId);
+  }
 }

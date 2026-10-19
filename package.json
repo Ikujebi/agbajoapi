@@ -10,7 +10,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "contract:emit": "prisma contract emit"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.0",
@@ -21,25 +22,39 @@
     "@nestjs/platform-express": "^10.4.0",
     "@nestjs/platform-socket.io": "^10.4.0",
     "@nestjs/websockets": "^10.4.0",
-    "@prisma/client": "^5.22.0",
+    "@prisma/client": "^7.10.1",
+    "@prisma/orm-postgres": "^8.0.0-rc.18",
     "bcryptjs": "^2.4.3",
     "class-transformer": "^0.5.1",
-    "class-validator": "^0.14.1",
-    "nodemailer": "^6.9.15",
+    "class-validator": "^0.14.4",
+    "dotenv": "^18.0.8",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "reflect-metadata": "^0.2.2",
+    "resend": "^6.34.1",
     "rxjs": "^7.8.1",
-    "socket.io": "^4.8.0"
+    "socket.io": "^4.8.0",
+    "socket.io-client": "^4.8.4"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.5",
+    "@prisma/cli-engine": "^0.7.0",
+    "@prisma/prisma7": "^7.10.1",
     "@types/bcryptjs": "^2.4.6",
     "@types/node": "^20.16.0",
     "@types/nodemailer": "^6.4.16",
     "@types/passport-jwt": "^4.0.1",
-    "prisma": "^5.22.0",
+    "prisma": "^8.0.0-rc.23",
     "ts-node": "^10.9.2",
     "typescript": "^5.6.0"
+  },
+  "allowScripts": {
+    "@nestjs/core@10.4.22": true,
+    "@prisma/client@5.22.0": true,
+    "esbuild@0.28.2": true,
+    "workerd@1.20261002.1": true,
+    "prisma@8.0.0-rc.23": true,
+    "prisma@7.10.1": true,
+    "@prisma/engines@7.10.1": true
   }
 }

@@ -1,160 +1,925 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { ChatPrivacy } from '@prisma/client';
+
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  ChatPrivacy,
+  ConversationStatus,
+  ConversationType,
+  MembershipRole,
+  MembershipStatus,
+  Prisma,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
-type Verdict = 'ALLOWED' | 'REQUEST' | 'DENIED';
-const pair = (a: string, b: string) => (a < b ? [a, b] : [b, a]);
+export type ChatVerdict = 'ALLOWED' | 'REQUEST' | 'DENIED';
+
+const MAX_MESSAGE_LENGTH = 5000;
+const MESSAGE_PAGE_SIZE = 50;
+const MAX_CONVERSATIONS = 100;
+
+type DirectConversation = Prisma.ConversationGetPayload<object> & {
+  type: 'DIRECT';
+  userAId: string;
+  userBId: string;
+};
+
+function sortUserPair(a: string, b: string): [string, string] {
+  return a < b ? [a, b] : [b, a];
+}
 
 @Injectable()
 export class ChatService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  private findConvo(a: string, b: string) {
-    const [userAId, userBId] = pair(a, b);
-    return this.prisma.conversation.findUnique({ where: { userAId_userBId: { userAId, userBId } } });
-  }
-
-  private async isAdminOfOrgWhereMember(adminId: string, userId: string) {
-    const adminOrgs = await this.prisma.membership.findMany({
-      where: { userId: adminId, role: 'ORG_ADMIN', status: 'APPROVED' }, select: { organizationId: true },
-    });
-    if (!adminOrgs.length) return false;
-    const m = await this.prisma.membership.findFirst({
-      where: { userId, status: 'APPROVED', organizationId: { in: adminOrgs.map((o) => o.organizationId) } },
-    });
-    return !!m;
-  }
-
-  private async shareOrg(a: string, b: string) {
-    const orgs = await this.prisma.membership.findMany({
-      where: { userId: a, status: 'APPROVED' }, select: { organizationId: true },
-    });
-    if (!orgs.length) return false;
-    const m = await this.prisma.membership.findFirst({
-      where: { userId: b, status: 'APPROVED', organizationId: { in: orgs.map((o) => o.organizationId) } },
-    });
-    return !!m;
-  }
-
-  /** The privacy rules: can `senderId` start a conversation with `recipientId`? */
-  async canStart(senderId: string, recipientId: string): Promise<Verdict> {
-    const blocked = await this.prisma.block.findFirst({
-      where: { OR: [{ blockerId: recipientId, blockedId: senderId }, { blockerId: senderId, blockedId: recipientId }] },
-    });
-    if (blocked) return 'DENIED';
-
-    const recipient = await this.prisma.user.findUnique({ where: { id: recipientId } });
-    if (!recipient || !recipient.isActive) throw new NotFoundException('User not found');
-
-    // Estate/org admins can always reach their members, and members can always reach their admins
-    if (await this.isAdminOfOrgWhereMember(senderId, recipientId)) return 'ALLOWED';
-    if (await this.isAdminOfOrgWhereMember(recipientId, senderId)) return 'ALLOWED';
-
-    switch (recipient.chatPrivacy as ChatPrivacy) {
-      case 'EVERYONE': return 'ALLOWED';
-      case 'MY_ORGS_ONLY': return (await this.shareOrg(senderId, recipientId)) ? 'ALLOWED' : 'DENIED';
-      case 'REQUEST_ONLY': return 'REQUEST';
-      case 'ADMINS_ONLY': return 'DENIED';
+  /**
+   * Ensures that a conversation is a valid direct conversation.
+   * The schema permits nullable participant IDs because it also supports
+   * group, organization, and support conversations.
+   */
+  private assertDirectConversation(
+    conversation: Prisma.ConversationGetPayload<object>,
+  ): asserts conversation is DirectConversation {
+    if (
+      conversation.type !== 'DIRECT' ||
+      !conversation.userAId ||
+      !conversation.userBId
+    ) {
+      throw new BadRequestException(
+        'This operation only supports direct conversations',
+      );
     }
   }
 
-  async send(senderId: string, recipientId: string, text: string) {
-    if (senderId === recipientId) throw new BadRequestException('You cannot message yourself');
-    let convo = await this.findConvo(senderId, recipientId);
+  private findConversation(userId: string, otherUserId: string) {
+    const [userAId, userBId] = sortUserPair(userId, otherUserId);
 
-    if (!convo) {
-      const verdict = await this.canStart(senderId, recipientId);
-      if (verdict === 'DENIED') throw new ForbiddenException('This user is not accepting messages from you');
-      const [userAId, userBId] = pair(senderId, recipientId);
-      convo = await this.prisma.conversation.create({
-        data: { userAId, userBId, initiatorId: senderId, status: verdict === 'REQUEST' ? 'REQUESTED' : 'ACTIVE' },
-      });
-    } else {
-      const blocked = await this.prisma.block.findFirst({
-        where: { OR: [{ blockerId: recipientId, blockedId: senderId }, { blockerId: senderId, blockedId: recipientId }] },
-      });
-      if (blocked) throw new ForbiddenException('Messaging is blocked');
-
-      if (convo.status === 'DECLINED' && convo.initiatorId === senderId) {
-        throw new ForbiddenException('This user declined your message request');
-      }
-      if (convo.status === 'REQUESTED') {
-        if (convo.initiatorId === senderId) {
-          throw new ForbiddenException('Wait for the user to accept your message request');
-        }
-        // the recipient replying implicitly accepts
-        convo = await this.prisma.conversation.update({ where: { id: convo.id }, data: { status: 'ACTIVE' } });
-      } else if (convo.status === 'DECLINED') {
-        // the decliner chose to message after all
-        convo = await this.prisma.conversation.update({ where: { id: convo.id }, data: { status: 'ACTIVE' } });
-      }
-    }
-
-    const message = await this.prisma.message.create({
-      data: { conversationId: convo.id, senderId, body: text },
-    });
-    await this.prisma.conversation.update({ where: { id: convo.id }, data: { updatedAt: new Date() } });
-    return { message, conversation: convo };
-  }
-
-  async respondToRequest(userId: string, conversationId: string, accept: boolean) {
-    const convo = await this.prisma.conversation.findUnique({ where: { id: conversationId } });
-    if (!convo || ![convo.userAId, convo.userBId].includes(userId)) throw new NotFoundException('Conversation not found');
-    if (convo.status !== 'REQUESTED' || convo.initiatorId === userId) throw new BadRequestException('No pending request to answer');
-    return this.prisma.conversation.update({
-      where: { id: convo.id }, data: { status: accept ? 'ACTIVE' : 'DECLINED' },
-    });
-  }
-
-  async conversations(userId: string, requestsOnly = false) {
-    const convos = await this.prisma.conversation.findMany({
+    return this.prisma.conversation.findUnique({
       where: {
-        OR: [{ userAId: userId }, { userBId: userId }],
+        userAId_userBId: {
+          userAId,
+          userBId,
+        },
+      },
+    });
+  }
+
+  private async assertActiveUser(userId: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        isActive: true,
+      },
+    });
+
+    if (!user || !user.isActive) {
+      throw new NotFoundException('User not found');
+    }
+  }
+
+  /**
+   * Used by the WebSocket gateway to verify that the authenticated
+   * user still exists and is active.
+   */
+  async assertSocketUserActive(userId: string): Promise<void> {
+    await this.assertActiveUser(userId);
+  }
+
+  /**
+   * A block in either direction prevents communication.
+   */
+  private async isBlocked(
+    userAId: string,
+    userBId: string,
+  ): Promise<boolean> {
+    const block = await this.prisma.block.findFirst({
+      where: {
+        OR: [
+          { blockerId: userAId, blockedId: userBId },
+          { blockerId: userBId, blockedId: userAId },
+        ],
+      },
+      select: { id: true },
+    });
+
+    return Boolean(block);
+  }
+
+  private async ensureConversationMembers(
+    conversationId: string,
+    userAId: string,
+    userBId: string,
+  ): Promise<void> {
+    await this.prisma.conversationMember.createMany({
+      data: [
+        { conversationId, userId: userAId },
+        { conversationId, userId: userBId },
+      ],
+      skipDuplicates: true,
+    });
+  }
+
+  /**
+   * Returns true when adminId is an approved organization owner/admin
+   * and memberId has an approved membership in the same organization.
+   */
+  private async isAdminOfOrgWhereMember(
+    adminId: string,
+    memberId: string,
+  ): Promise<boolean> {
+    const adminMemberships = await this.prisma.membership.findMany({
+      where: {
+        userId: adminId,
+        role: {
+          in: [
+            MembershipRole.ORG_ADMIN,
+            MembershipRole.ORG_OWNER,
+          ],
+        },
+        status: MembershipStatus.APPROVED,
+      },
+      select: { organizationId: true },
+    });
+
+    if (adminMemberships.length === 0) {
+      return false;
+    }
+
+    const membership = await this.prisma.membership.findFirst({
+      where: {
+        userId: memberId,
+        status: MembershipStatus.APPROVED,
+        organizationId: {
+          in: adminMemberships.map((item) => item.organizationId),
+        },
+      },
+      select: { id: true },
+    });
+
+    return Boolean(membership);
+  }
+
+  private async shareOrganization(
+    userAId: string,
+    userBId: string,
+  ): Promise<boolean> {
+    const memberships = await this.prisma.membership.findMany({
+      where: {
+        userId: userAId,
+        status: MembershipStatus.APPROVED,
+      },
+      select: { organizationId: true },
+    });
+
+    if (memberships.length === 0) {
+      return false;
+    }
+
+    const sharedMembership = await this.prisma.membership.findFirst({
+      where: {
+        userId: userBId,
+        status: MembershipStatus.APPROVED,
+        organizationId: {
+          in: memberships.map((item) => item.organizationId),
+        },
+      },
+      select: { id: true },
+    });
+
+    return Boolean(sharedMembership);
+  }
+
+  /**
+   * Determines whether a sender may start a direct conversation.
+   * Blocks take precedence over privacy exceptions.
+   */
+  async canStart(
+    senderId: string,
+    recipientId: string,
+  ): Promise<ChatVerdict> {
+    if (senderId === recipientId) {
+      throw new BadRequestException(
+        'You cannot message yourself',
+      );
+    }
+
+    if (await this.isBlocked(senderId, recipientId)) {
+      return 'DENIED';
+    }
+
+    const recipient = await this.prisma.user.findUnique({
+      where: { id: recipientId },
+      select: {
+        id: true,
+        isActive: true,
+        chatPrivacy: true,
+      },
+    });
+
+    if (!recipient || !recipient.isActive) {
+      throw new NotFoundException('User not found');
+    }
+
+    // Preserve the existing organization admin/owner exception.
+    if (
+      await this.isAdminOfOrgWhereMember(
+        senderId,
+        recipientId,
+      )
+    ) {
+      return 'ALLOWED';
+    }
+
+    if (
+      await this.isAdminOfOrgWhereMember(
+        recipientId,
+        senderId,
+      )
+    ) {
+      return 'ALLOWED';
+    }
+
+    switch (recipient.chatPrivacy) {
+      case ChatPrivacy.EVERYONE:
+        return 'ALLOWED';
+
+      case ChatPrivacy.MY_ORGS_ONLY:
+        return (await this.shareOrganization(
+          senderId,
+          recipientId,
+        ))
+          ? 'ALLOWED'
+          : 'DENIED';
+
+      case ChatPrivacy.REQUEST_ONLY:
+        return 'REQUEST';
+
+      case ChatPrivacy.ADMINS_ONLY:
+        return 'DENIED';
+
+      default:
+        return 'DENIED';
+    }
+  }
+
+  /**
+   * Sends a message or initiates a message request.
+   */
+  async send(
+    senderId: string,
+    recipientId: string,
+    text: string,
+  ) {
+    if (senderId === recipientId) {
+      throw new BadRequestException(
+        'You cannot message yourself',
+      );
+    }
+
+    if (typeof text !== 'string' || text.trim().length === 0) {
+      throw new BadRequestException(
+        'Message cannot be empty',
+      );
+    }
+
+    const body = text.trim();
+
+    if (body.length > MAX_MESSAGE_LENGTH) {
+      throw new BadRequestException(
+        `Message cannot exceed ${MAX_MESSAGE_LENGTH} characters`,
+      );
+    }
+
+    await Promise.all([
+      this.assertActiveUser(senderId),
+      this.assertActiveUser(recipientId),
+    ]);
+
+    if (await this.isBlocked(senderId, recipientId)) {
+      throw new ForbiddenException(
+        'Messaging is blocked between these users',
+      );
+    }
+
+    let conversation = await this.findConversation(
+      senderId,
+      recipientId,
+    );
+
+    let createdByThisRequest = false;
+
+    if (!conversation) {
+      const verdict = await this.canStart(
+        senderId,
+        recipientId,
+      );
+
+      if (verdict === 'DENIED') {
+        throw new ForbiddenException(
+          'This user is not accepting messages from you',
+        );
+      }
+
+      const [userAId, userBId] = sortUserPair(
+        senderId,
+        recipientId,
+      );
+
+      try {
+        conversation = await this.prisma.conversation.create({
+          data: {
+            type: ConversationType.DIRECT,
+            userAId,
+            userBId,
+            initiatorId: senderId,
+            status:
+              verdict === 'REQUEST'
+                ? ConversationStatus.REQUESTED
+                : ConversationStatus.ACTIVE,
+          },
+        });
+
+        createdByThisRequest = true;
+      } catch (error) {
+        // Another request may have created the unique direct pair
+        // between the initial lookup and the create operation.
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2002'
+        ) {
+          conversation = await this.findConversation(
+            senderId,
+            recipientId,
+          );
+        } else {
+          throw error;
+        }
+      }
+
+      if (!conversation) {
+        throw new BadRequestException(
+          'Unable to start the conversation. Please try again.',
+        );
+      }
+    }
+
+    if (!createdByThisRequest) {
+      if (await this.isBlocked(senderId, recipientId)) {
+        throw new ForbiddenException(
+          'Messaging is blocked between these users',
+        );
+      }
+
+      if (
+        conversation.status === ConversationStatus.DECLINED &&
+        conversation.initiatorId === senderId
+      ) {
+        throw new ForbiddenException(
+          'Your message request was declined',
+        );
+      }
+
+      if (
+        conversation.status === ConversationStatus.REQUESTED
+      ) {
+        if (conversation.initiatorId === senderId) {
+          throw new ForbiddenException(
+            'Wait for the recipient to accept your message request',
+          );
+        }
+
+        // A reply from the recipient accepts the pending request.
+        conversation = await this.prisma.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            status: ConversationStatus.ACTIVE,
+          },
+        });
+      } else if (
+        conversation.status === ConversationStatus.DECLINED
+      ) {
+        // The recipient who declined can start messaging again.
+        conversation = await this.prisma.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            status: ConversationStatus.ACTIVE,
+          },
+        });
+      }
+    }
+
+    if (
+      conversation.status !== ConversationStatus.ACTIVE &&
+      conversation.status !== ConversationStatus.REQUESTED
+    ) {
+      throw new ForbiddenException(
+        'This conversation is not available',
+      );
+    }
+
+    this.assertDirectConversation(conversation);
+
+    await this.ensureConversationMembers(
+      conversation.id,
+      conversation.userAId,
+      conversation.userBId,
+    );
+
+    const message = await this.prisma.$transaction(async (tx) => {
+      const createdMessage = await tx.message.create({
+        data: {
+          conversationId: conversation.id,
+          senderId,
+          body,
+        },
+      });
+
+      await tx.conversation.update({
+        where: { id: conversation.id },
+        data: { updatedAt: new Date() },
+      });
+
+      return createdMessage;
+    });
+
+    return {
+      message,
+      conversation,
+    };
+  }
+
+  /**
+   * Accepts or declines a pending direct message request.
+   */
+  async respondToRequest(
+    userId: string,
+    conversationId: string,
+    accept: boolean,
+  ) {
+    const conversation =
+      await this.prisma.conversation.findUnique({
+        where: { id: conversationId },
+      });
+
+    if (!conversation) {
+      throw new NotFoundException(
+        'Conversation not found',
+      );
+    }
+
+    this.assertDirectConversation(conversation);
+
+    if (
+      ![conversation.userAId, conversation.userBId].includes(
+        userId,
+      )
+    ) {
+      throw new NotFoundException(
+        'Conversation not found',
+      );
+    }
+
+    if (
+      conversation.status !== ConversationStatus.REQUESTED ||
+      conversation.initiatorId === userId
+    ) {
+      throw new BadRequestException(
+        'No pending request to answer',
+      );
+    }
+
+    if (
+      await this.isBlocked(
+        conversation.userAId,
+        conversation.userBId,
+      )
+    ) {
+      throw new ForbiddenException(
+        'Messaging is blocked between these users',
+      );
+    }
+
+    const updated = await this.prisma.conversation.update({
+      where: { id: conversation.id },
+      data: {
+        status: accept
+          ? ConversationStatus.ACTIVE
+          : ConversationStatus.DECLINED,
+      },
+    });
+
+    this.assertDirectConversation(updated);
+
+    await this.ensureConversationMembers(
+      updated.id,
+      updated.userAId,
+      updated.userBId,
+    );
+
+    return updated;
+  }
+
+  /**
+   * Lists a user's direct conversations.
+   *
+   * When requestsOnly is true, only pending requests received
+   * from other users are returned.
+   */
+  async conversations(
+    userId: string,
+    requestsOnly = false,
+  ) {
+    await this.assertActiveUser(userId);
+
+    const items = await this.prisma.conversation.findMany({
+      where: {
+        type: ConversationType.DIRECT,
+        OR: [
+          { userAId: userId },
+          { userBId: userId },
+        ],
         ...(requestsOnly
-          ? { status: 'REQUESTED', NOT: { initiatorId: userId } }
-          : { status: { in: ['ACTIVE', 'REQUESTED'] } }),
+          ? {
+              status: ConversationStatus.REQUESTED,
+              NOT: { initiatorId: userId },
+            }
+          : {
+              status: {
+                in: [
+                  ConversationStatus.ACTIVE,
+                  ConversationStatus.REQUESTED,
+                ],
+              },
+            }),
       },
       include: {
-        userA: { select: { id: true, fullName: true, avatarUrl: true } },
-        userB: { select: { id: true, fullName: true, avatarUrl: true } },
-        messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+        userA: {
+          select: {
+            id: true,
+            fullName: true,
+            avatarUrl: true,
+          },
+        },
+        userB: {
+          select: {
+            id: true,
+            fullName: true,
+            avatarUrl: true,
+          },
+        },
+        messages: {
+          where: { deletedAt: null },
+          orderBy: [
+            { createdAt: 'desc' },
+            { id: 'desc' },
+          ],
+          take: 1,
+        },
       },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [
+        { updatedAt: 'desc' },
+        { id: 'desc' },
+      ],
+      take: MAX_CONVERSATIONS,
     });
-    return convos.map((c) => ({
-      id: c.id, status: c.status, initiatorId: c.initiatorId,
-      other: c.userAId === userId ? c.userB : c.userA,
-      lastMessage: c.messages[0] ?? null,
-    }));
+
+    // Hide conversation previews when either participant has
+    // blocked the other.
+    const blocks = await this.prisma.block.findMany({
+      where: {
+        OR: [
+          { blockerId: userId },
+          { blockedId: userId },
+        ],
+      },
+      select: {
+        blockerId: true,
+        blockedId: true,
+      },
+    });
+
+    const blockedUserIds = new Set<string>();
+
+    for (const block of blocks) {
+      blockedUserIds.add(
+        block.blockerId === userId
+          ? block.blockedId
+          : block.blockerId,
+      );
+    }
+
+    return items
+      .filter((item) => {
+        const otherUserId =
+          item.userAId === userId
+            ? item.userBId
+            : item.userAId;
+
+        return (
+          otherUserId !== null &&
+          !blockedUserIds.has(otherUserId)
+        );
+      })
+      .map((item) => ({
+        id: item.id,
+        status: item.status,
+        initiatorId: item.initiatorId,
+        other:
+          item.userAId === userId
+            ? item.userB
+            : item.userA,
+        lastMessage: item.messages[0] ?? null,
+      }));
   }
 
-  async messages(userId: string, conversationId: string, before?: string) {
-    const convo = await this.prisma.conversation.findUnique({ where: { id: conversationId } });
-    if (!convo || ![convo.userAId, convo.userBId].includes(userId)) throw new NotFoundException('Conversation not found');
-    await this.prisma.message.updateMany({
-      where: { conversationId, senderId: { not: userId }, readAt: null }, data: { readAt: new Date() },
+  /**
+   * Retrieves the newest 50 messages, or the next page before
+   * the supplied message cursor.
+   */
+  async messages(
+    userId: string,
+    conversationId: string,
+    cursor?: string,
+  ) {
+    const conversation =
+      await this.prisma.conversation.findUnique({
+        where: { id: conversationId },
+      });
+
+    if (!conversation) {
+      throw new NotFoundException(
+        'Conversation not found',
+      );
+    }
+
+    this.assertDirectConversation(conversation);
+
+    if (
+      ![
+        conversation.userAId,
+        conversation.userBId,
+      ].includes(userId)
+    ) {
+      throw new NotFoundException(
+        'Conversation not found',
+      );
+    }
+
+    if (conversation.status !== ConversationStatus.ACTIVE) {
+      throw new ForbiddenException(
+        'Accept this message request to view the conversation',
+      );
+    }
+
+    if (
+      await this.isBlocked(
+        conversation.userAId,
+        conversation.userBId,
+      )
+    ) {
+      throw new ForbiddenException(
+        'Messaging is blocked between these users',
+      );
+    }
+
+    if (cursor) {
+      const cursorMessage =
+        await this.prisma.message.findFirst({
+          where: {
+            id: cursor,
+            conversationId,
+          },
+          select: { id: true },
+        });
+
+      if (!cursorMessage) {
+        throw new BadRequestException(
+          'Invalid message cursor',
+        );
+      }
+    }
+
+    await this.ensureConversationMembers(
+      conversation.id,
+      conversation.userAId,
+      conversation.userBId,
+    );
+
+    await this.prisma.conversationMember.updateMany({
+      where: {
+        conversationId,
+        userId,
+      },
+      data: {
+        lastReadAt: new Date(),
+      },
     });
+
     return this.prisma.message.findMany({
-      where: { conversationId, ...(before && { createdAt: { lt: new Date(before) } }) },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
+      where: {
+        conversationId,
+        deletedAt: null,
+      },
+      orderBy: [
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ],
+      take: MESSAGE_PAGE_SIZE,
+      ...(cursor
+        ? {
+            cursor: { id: cursor },
+            skip: 1,
+          }
+        : {}),
     });
   }
 
-  setPrivacy(userId: string, chatPrivacy: ChatPrivacy) {
-    return this.prisma.user.update({ where: { id: userId }, data: { chatPrivacy }, select: { id: true, chatPrivacy: true } });
+  /**
+   * Explicitly updates the current user's read position.
+   */
+  async markRead(
+    userId: string,
+    conversationId: string,
+  ) {
+    const conversation =
+      await this.prisma.conversation.findUnique({
+        where: { id: conversationId },
+      });
+
+    if (!conversation) {
+      throw new NotFoundException(
+        'Conversation not found',
+      );
+    }
+
+    this.assertDirectConversation(conversation);
+
+    if (
+      ![
+        conversation.userAId,
+        conversation.userBId,
+      ].includes(userId)
+    ) {
+      throw new NotFoundException(
+        'Conversation not found',
+      );
+    }
+
+    if (conversation.status !== ConversationStatus.ACTIVE) {
+      throw new ForbiddenException(
+        'This conversation is not active',
+      );
+    }
+
+    if (
+      await this.isBlocked(
+        conversation.userAId,
+        conversation.userBId,
+      )
+    ) {
+      throw new ForbiddenException(
+        'Messaging is blocked between these users',
+      );
+    }
+
+    await this.ensureConversationMembers(
+      conversation.id,
+      conversation.userAId,
+      conversation.userBId,
+    );
+
+    const lastReadAt = new Date();
+
+    await this.prisma.conversationMember.updateMany({
+      where: {
+        conversationId,
+        userId,
+      },
+      data: { lastReadAt },
+    });
+
+    return {
+      conversationId,
+      userId,
+      lastReadAt,
+    };
   }
 
-  async block(blockerId: string, blockedId: string) {
-    if (blockerId === blockedId) throw new BadRequestException('Invalid');
+  /**
+   * Returns participant IDs for an authorized conversation.
+   */
+  async getConversationParticipants(
+    userId: string,
+    conversationId: string,
+  ) {
+    const conversation =
+      await this.prisma.conversation.findUnique({
+        where: { id: conversationId },
+        select: {
+          type: true,
+          userAId: true,
+          userBId: true,
+        },
+      });
+
+    if (
+      !conversation ||
+      conversation.type !== 'DIRECT' ||
+      !conversation.userAId ||
+      !conversation.userBId ||
+      ![
+        conversation.userAId,
+        conversation.userBId,
+      ].includes(userId)
+    ) {
+      throw new NotFoundException(
+        'Conversation not found',
+      );
+    }
+
+    return {
+      userAId: conversation.userAId,
+      userBId: conversation.userBId,
+      otherUserId:
+        conversation.userAId === userId
+          ? conversation.userBId
+          : conversation.userAId,
+    };
+  }
+
+  /**
+   * Updates the user's chat privacy setting.
+   */
+  async setPrivacy(
+    userId: string,
+    chatPrivacy: ChatPrivacy,
+  ) {
+    await this.assertActiveUser(userId);
+
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: { chatPrivacy },
+      select: {
+        id: true,
+        chatPrivacy: true,
+      },
+    });
+  }
+
+  /**
+   * Blocks another user. The unique constraint prevents duplicate
+   * block records for the same direction.
+   */
+  async block(
+    blockerId: string,
+    blockedId: string,
+  ) {
+    if (blockerId === blockedId) {
+      throw new BadRequestException(
+        'You cannot block yourself',
+      );
+    }
+
+    await Promise.all([
+      this.assertActiveUser(blockerId),
+      this.assertActiveUser(blockedId),
+    ]);
+
     await this.prisma.block.upsert({
-      where: { blockerId_blockedId: { blockerId, blockedId } }, create: { blockerId, blockedId }, update: {},
+      where: {
+        blockerId_blockedId: {
+          blockerId,
+          blockedId,
+        },
+      },
+      create: {
+        blockerId,
+        blockedId,
+      },
+      update: {},
     });
+
     return { ok: true };
   }
 
-  async unblock(blockerId: string, blockedId: string) {
-    await this.prisma.block.deleteMany({ where: { blockerId, blockedId } });
+  /**
+   * Removes a block created by the requesting user.
+   */
+  async unblock(
+    blockerId: string,
+    blockedId: string,
+  ) {
+    await this.prisma.block.deleteMany({
+      where: {
+        blockerId,
+        blockedId,
+      },
+    });
+
     return { ok: true };
   }
 }
