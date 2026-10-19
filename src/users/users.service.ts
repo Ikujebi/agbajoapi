@@ -71,8 +71,8 @@ export class UsersService {
    */
   async directory(userId: string, orgId: string) {
     const allowedRoles: MembershipRole[] = [
-      MembershipRole.ORG_OWNER,
-      MembershipRole.ORG_ADMIN,
+      MembershipRole.OWNER,
+      MembershipRole.ADMIN,
       MembershipRole.MANAGER,
       MembershipRole.SECURITY,
       MembershipRole.RESIDENT,

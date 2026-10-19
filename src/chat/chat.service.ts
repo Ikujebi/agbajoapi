@@ -136,8 +136,8 @@ export class ChatService {
         userId: adminId,
         role: {
           in: [
-            MembershipRole.ORG_ADMIN,
-            MembershipRole.ORG_OWNER,
+            MembershipRole.ADMIN,
+            MembershipRole.OWNER,
           ],
         },
         status: MembershipStatus.APPROVED,

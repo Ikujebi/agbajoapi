@@ -44,8 +44,8 @@ export class ProductsService {
     }
 
     const allowedRoles: MembershipRole[] = [
-      MembershipRole.ORG_OWNER,
-      MembershipRole.ORG_ADMIN,
+      MembershipRole.OWNER,
+      MembershipRole.ADMIN,
       MembershipRole.MANAGER,
       MembershipRole.STAFF,
     ];

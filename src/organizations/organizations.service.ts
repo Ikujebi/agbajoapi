@@ -93,7 +93,7 @@ export class OrganizationsService {
           memberships: {
             create: {
               userId,
-              role: MembershipRole.ORG_ADMIN,
+              role: MembershipRole.ADMIN,
               status: MembershipStatus.APPROVED,
             },
           },
@@ -201,7 +201,7 @@ export class OrganizationsService {
       where: {
         organizationId: orgId,
         role: {
-          in: [MembershipRole.ORG_ADMIN, MembershipRole.ORG_OWNER],
+          in: [MembershipRole.ADMIN, MembershipRole.OWNER],
         },
         status: MembershipStatus.APPROVED,
       },
@@ -227,8 +227,8 @@ export class OrganizationsService {
     status?: MembershipStatus,
   ) {
     await this.assertRole(userId, orgId, [
-      MembershipRole.ORG_ADMIN,
-      MembershipRole.ORG_OWNER,
+      MembershipRole.ADMIN,
+      MembershipRole.OWNER,
     ]);
 
     return this.prisma.membership.findMany({
@@ -257,8 +257,8 @@ export class OrganizationsService {
     dto: ReviewMembershipDto,
   ) {
     await this.assertRole(adminId, orgId, [
-      MembershipRole.ORG_ADMIN,
-      MembershipRole.ORG_OWNER,
+      MembershipRole.ADMIN,
+      MembershipRole.OWNER,
     ]);
 
     const membership = await this.prisma.membership.findFirst({
@@ -339,8 +339,8 @@ export class OrganizationsService {
     dto: BroadcastEmailDto,
   ) {
     await this.assertRole(adminId, orgId, [
-      MembershipRole.ORG_ADMIN,
-      MembershipRole.ORG_OWNER,
+      MembershipRole.ADMIN,
+      MembershipRole.OWNER,
     ]);
 
     const organization = await this.getOrThrow(orgId);

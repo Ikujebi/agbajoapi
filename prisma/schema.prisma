@@ -18,8 +18,10 @@ enum OrgType {
 }
 
 enum MembershipRole {
-  ORG_OWNER
-  ORG_ADMIN
+  OWNER        
+  CHAIRMAN
+  SUPER_ADMIN
+  ADMIN     
   MANAGER
   SECURITY
   RESIDENT
@@ -261,6 +263,7 @@ model User {
   phone           String      @unique
   passwordHash    String
   avatarUrl       String?
+  avatarPublicId  String?
   bio             String?
   isSuperAdmin    Boolean     @default(false)
   isActive        Boolean     @default(true)
@@ -378,7 +381,9 @@ model Organization {
   email       String?
   website     String?
   logoUrl     String?
+  logoPublicId   String?
   coverUrl    String?
+  coverPublicId  String?
   isVerified  Boolean  @default(false)
   isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
@@ -562,10 +567,12 @@ model Product {
   @@index([name])
 }
 
+
 model ProductImage {
   id        String   @id @default(uuid())
   productId String
   url       String
+  publicId  String?
   altText   String?
   sortOrder Int      @default(0)
   createdAt DateTime @default(now())
@@ -574,6 +581,7 @@ model ProductImage {
 
   @@index([productId, sortOrder])
 }
+
 
 model StockMovement {
   id            String            @id @default(uuid())
@@ -748,10 +756,12 @@ model MarketplaceListing {
   @@index([price])
 }
 
+
 model ListingImage {
   id        String  @id @default(uuid())
   listingId String
   url       String
+  publicId  String?
   altText   String?
   sortOrder Int     @default(0)
 
@@ -759,6 +769,7 @@ model ListingImage {
 
   @@index([listingId, sortOrder])
 }
+
 
 model ListingInquiry {
   id        String   @id @default(uuid())

@@ -45,8 +45,8 @@ export class VisitorsService {
 
     const roles: MembershipRole[] = [
       MembershipRole.RESIDENT,
-      MembershipRole.ORG_ADMIN,
-      MembershipRole.ORG_OWNER,
+      MembershipRole.ADMIN,
+      MembershipRole.OWNER,
       MembershipRole.SECURITY,
     ];
 
