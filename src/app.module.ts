@@ -17,7 +17,8 @@ import { PermissionsModule } from './common/permissions/permissions.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentsModule } from './payments/payments.module';
 import { OrgHoursModule } from './org-hours/org-hours.module';
-
+import {NoticesModule} from './notice/notices.module';
+import { SosModule } from './sos/sos.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -46,6 +47,8 @@ import { OrgHoursModule } from './org-hours/org-hours.module';
     OrdersModule,
     PaymentsModule,
     OrgHoursModule,
+    NoticesModule,
+    SosModule,
   ],
   providers: [
     {

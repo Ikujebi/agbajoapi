@@ -2,13 +2,16 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
 import { createHash, randomInt } from 'crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { OrganizationsService } from '../organizations/organizations.service';
+import { OrgHoursService } from '../org-hours/org-hours.service';
 import { PermissionsService } from '../common/permissions/permissions.service';
 import { Permission } from '../common/permissions/permissions';
 import { AuthUser } from '../common/decorators/current-user.decorator';
@@ -24,11 +27,13 @@ const hashCode = (code: string): string =>
 
 @Injectable()
 export class VisitorsService {
+  private readonly log = new Logger(VisitorsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly orgs: OrganizationsService,
     private readonly permissions: PermissionsService,
-    private readonly hours: OrganizationsService,
+    private readonly hours: OrgHoursService,
   ) {}
 
   /**
@@ -150,6 +155,13 @@ export class VisitorsService {
   async verify(user: AuthUser, dto: VerifyPassDto) {
     await this.assertEstate(user, dto.organizationId, 'visitor.verify');
 
+    // Entry is only allowed during the estate's visiting hours.
+    await this.hours.assertOpen(
+      dto.organizationId,
+      'VISITING',
+      'Visitors cannot be admitted outside visiting hours',
+    );
+
     const securityId = user.id;
     const code = dto.code.trim().toUpperCase();
 
@@ -238,6 +250,7 @@ export class VisitorsService {
       await tx.notification.create({
         data: {
           userId: pass.hostId,
+          type: 'VISITOR_PASS',
           title: 'Visitor arrived',
           body: `${pass.visitorName} has been admitted at the gate.`,
         },
@@ -256,6 +269,7 @@ export class VisitorsService {
   }
 
   async exit(user: AuthUser, dto: VerifyPassDto) {
+    // Exit is always allowed, even outside visiting hours.
     await this.assertEstate(user, dto.organizationId, 'visitor.verify');
 
     const pass = await this.prisma.visitorPass.findFirst({
@@ -304,5 +318,26 @@ export class VisitorsService {
       take: 200,
     });
   }
-  
+
+  /**
+   * Marks passes whose validity window has ended as EXPIRED.
+   * Needs ScheduleModule.forRoot() in AppModule.
+   */
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async expireStalePasses(): Promise<void> {
+    try {
+      const result = await this.prisma.visitorPass.updateMany({
+        where: { status: 'ACTIVE', validUntil: { lt: new Date() } },
+        data: { status: 'EXPIRED' },
+      });
+
+      if (result.count > 0) {
+        this.log.log(`Expired ${result.count} visitor pass(es)`);
+      }
+    } catch (error) {
+      this.log.error(
+        `Failed to expire visitor passes: ${(error as Error).message}`,
+      );
+    }
+  }
 }

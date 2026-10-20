@@ -25,6 +25,7 @@ enum MessageType {
   FILE
   DOCUMENT
 }
+  
 
 enum MembershipRole {
   OWNER
