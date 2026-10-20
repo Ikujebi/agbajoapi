@@ -1,23 +1,22 @@
-import {
-  IsInt,
-  IsOptional,
-  IsString,
-  MaxLength,
-  Min,
-  NotEquals,
-} from 'class-validator';
-import { Type } from 'class-transformer';
+import { StockMovementType } from '@prisma/client';
+import { IsEnum, IsInt, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class StockAdjustDto {
-  @Type(() => Number)
+  /** Positive adds stock, negative removes it. Zero is rejected by the service. */
   @IsInt()
-  @NotEquals(0, {
-    message: 'Stock adjustment must be a non-zero integer.',
-  })
   delta!: number;
 
   @IsOptional()
   @IsString()
-  @MaxLength(500)
-  reason?: string | null;
+  @MaxLength(200)
+  reason?: string;
+
+  /**
+   * SALE and RETURN need sale.record (attendants have it).
+   * RESTOCK, DAMAGE and ADJUSTMENT need stock.adjust.
+   * Defaults to ADJUSTMENT.
+   */
+  @IsOptional()
+  @IsEnum(StockMovementType)
+  type?: StockMovementType;
 }

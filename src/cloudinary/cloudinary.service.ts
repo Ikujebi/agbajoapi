@@ -123,4 +123,52 @@ export class CloudinaryService {
       );
     }
   }
+  
+  /**
+   * Upload chat attachments. Images use image resources, video/audio use video,
+   * and documents/other files use raw resources. MIME allow-listing must also be
+   * enforced by the controller.
+   */
+  async uploadChatMedia(
+    file: Express.Multer.File,
+    folder: string,
+  ): Promise<{ url: string; publicId: string; resourceType: 'image' | 'video' | 'raw'; format: string }> {
+    if (!file?.buffer || file.size === 0) {
+      throw new InternalServerErrorException('A valid file buffer is required');
+    }
+
+    const resourceType: 'image' | 'video' | 'raw' =
+      file.mimetype.startsWith('image/') ? 'image' :
+      (file.mimetype.startsWith('video/') || file.mimetype.startsWith('audio/')) ? 'video' : 'raw';
+
+    try {
+      const result = await new Promise<UploadApiResponse>((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder,
+            resource_type: resourceType,
+            use_filename: true,
+            unique_filename: true,
+            filename_override: file.originalname,
+          },
+          (error: UploadApiErrorResponse | undefined, response: UploadApiResponse | undefined) => {
+            if (error) return reject(error);
+            if (!response) return reject(new Error('Cloudinary returned no result'));
+            resolve(response);
+          },
+        );
+        Readable.from(file.buffer).pipe(stream);
+      });
+      return {
+        url: result.secure_url,
+        publicId: result.public_id,
+        resourceType,
+        format: result.format,
+      };
+    } catch {
+      this.logger.error('Cloudinary chat media upload failed');
+      throw new InternalServerErrorException('Media upload failed. Please try again.');
+    }
+  }
+
 }

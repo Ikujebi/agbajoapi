@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
+  provider = "postgresql"
 }
 
 enum OrgType {
@@ -17,18 +17,34 @@ enum OrgType {
   OTHER
 }
 
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  FILE
+  DOCUMENT
+}
+
 enum MembershipRole {
-  OWNER        
+  OWNER
   CHAIRMAN
   SUPER_ADMIN
-  ADMIN     
+  ADMIN
   MANAGER
   SECURITY
   RESIDENT
+  ATTENDANT
   MEMBER
+  RIDER
   STAFF
   ACCOUNTANT
   MODERATOR
+}
+
+enum HoursKind {
+  OPENING // shops, churches and others: when the place is open
+  VISITING // estates: when visitors may be admitted
 }
 
 enum MembershipStatus {
@@ -366,28 +382,28 @@ model UserNeighborhood {
 }
 
 model Organization {
-  id          String   @id @default(uuid())
-  type        OrgType
-  name        String
-  slug        String?  @unique
-  description String?
-  address     String?
-  city        String?
-  state       String?
-  country     String   @default("Nigeria")
-  latitude    Decimal? @db.Decimal(10, 7)
-  longitude   Decimal? @db.Decimal(10, 7)
-  phone       String?
-  email       String?
-  website     String?
-  logoUrl     String?
-  logoPublicId   String?
-  coverUrl    String?
-  coverPublicId  String?
-  isVerified  Boolean  @default(false)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            String   @id @default(uuid())
+  type          OrgType
+  name          String
+  slug          String?  @unique
+  description   String?
+  address       String?
+  city          String?
+  state         String?
+  country       String   @default("Nigeria")
+  latitude      Decimal? @db.Decimal(10, 7)
+  longitude     Decimal? @db.Decimal(10, 7)
+  phone         String?
+  email         String?
+  website       String?
+  logoUrl       String?
+  logoPublicId  String?
+  coverUrl      String?
+  coverPublicId String?
+  isVerified    Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   memberships       Membership[]
   neighborhoodLinks OrganizationNeighborhood[]
@@ -418,6 +434,9 @@ model Organization {
   auditLogs         AuditLog[]
   deliveries        Delivery[]
   paymentRecords    Payment[]
+  timezone          String                     @default("Africa/Lagos")
+  acceptingOrders   Boolean                    @default(true) // manual pause switch for shops
+  hours             OrganizationHours[]
 
   @@index([type, name])
   @@index([city, state])
@@ -436,6 +455,21 @@ model OrganizationNeighborhood {
 
   @@unique([organizationId, neighborhoodId])
   @@index([neighborhoodId])
+}
+
+model OrganizationHours {
+  id             String    @id @default(uuid())
+  organizationId String
+  kind           HoursKind @default(OPENING)
+  dayOfWeek      Int // 0 = Sunday ... 6 = Saturday
+  opensAt        String // "HH:mm"
+  closesAt       String // "HH:mm"; earlier than opensAt means it runs past midnight
+  isClosed       Boolean   @default(false)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, kind, dayOfWeek])
+  @@index([organizationId, kind])
 }
 
 model Membership {
@@ -567,7 +601,6 @@ model Product {
   @@index([name])
 }
 
-
 model ProductImage {
   id        String   @id @default(uuid())
   productId String
@@ -581,7 +614,6 @@ model ProductImage {
 
   @@index([productId, sortOrder])
 }
-
 
 model StockMovement {
   id            String            @id @default(uuid())
@@ -756,7 +788,6 @@ model MarketplaceListing {
   @@index([price])
 }
 
-
 model ListingImage {
   id        String  @id @default(uuid())
   listingId String
@@ -769,7 +800,6 @@ model ListingImage {
 
   @@index([listingId, sortOrder])
 }
-
 
 model ListingInquiry {
   id        String   @id @default(uuid())
@@ -936,21 +966,28 @@ model ConversationMember {
 }
 
 model Message {
-  id             String    @id @default(uuid())
+  id             String @id @default(uuid())
   conversationId String
   senderId       String
-  body           String
-  attachmentUrl  String?
-  attachmentType String?
-  editedAt       DateTime?
-  deletedAt      DateTime?
-  createdAt      DateTime  @default(now())
+
+  body String?
+  type MessageType @default(TEXT)
+
+  mediaUrl      String?
+  mediaPublicId String?
+  mediaFileName String?
+  mediaMimeType String?
+  mediaSize     Int?
+
+  isEdited  Boolean   @default(false)
+  editedAt  DateTime?
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender       User         @relation(fields: [senderId], references: [id])
-
-  @@index([conversationId, createdAt])
-  @@index([senderId, createdAt])
 }
 
 model Notice {

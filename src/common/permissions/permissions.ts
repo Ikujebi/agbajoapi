@@ -1,137 +1,100 @@
-
 import { MembershipRole as R, OrgType } from '@prisma/client';
 
-export type Permission =
-  | 'org.manage'
-  | 'members.view'
-  | 'members.manage'
-  | 'notice.manage'
-  | 'email.broadcast'
-  | 'visitor.create'
-  | 'visitor.verify'
-  | 'gate.view'
-  | 'sos.respond'
-  | 'product.view'
-  | 'product.create'
-  | 'product.edit'
-  | 'product.delete'
-  | 'stock.adjust'
-  | 'sale.record'
-  | 'order.manage'
-  | 'expense.manage'
-  | 'finance.view'
-  | 'giving.manage'
-  | 'attendance.mark'
-  | 'event.manage';
-
-const ALL: Permission[] = [
+export const PERMISSIONS = [
+  // organization
   'org.manage',
   'members.view',
   'members.manage',
   'notice.manage',
   'email.broadcast',
+  'hours.manage',
+  // estates
   'visitor.create',
   'visitor.verify',
   'gate.view',
   'sos.respond',
+  // shops: catalogue and stock
   'product.view',
   'product.create',
   'product.edit',
   'product.delete',
   'stock.adjust',
   'sale.record',
+  // shops: orders and delivery
+  'order.view',
   'order.manage',
+  'delivery.perform',
+  // money
   'expense.manage',
   'finance.view',
+  // worship
   'giving.manage',
   'attendance.mark',
   'event.manage',
-];
+] as const;
+
+export type Permission = (typeof PERMISSIONS)[number];
+
+const ALL: Permission[] = [...PERMISSIONS];
 
 type RoleMap = Partial<Record<R, Permission[]>>;
 
 const ESTATE: RoleMap = {
-  OWNER: ALL,
   CHAIRMAN: ALL,
   ADMIN: [
     'members.view',
     'members.manage',
     'notice.manage',
     'email.broadcast',
+    'hours.manage',
     'visitor.create',
-    'visitor.verify',
     'gate.view',
     'sos.respond',
     'event.manage',
   ],
-  SECURITY: [
-    'visitor.verify',
-    'gate.view',
-    'sos.respond',
-  ],
-  RESIDENT: [
-    'visitor.create',
-  ],
-  MEMBER: [
-    'visitor.create',
-  ],
+  SECURITY: ['visitor.verify', 'gate.view', 'sos.respond'],
+  MEMBER: ['visitor.create'],
 };
 
 const SHOP: RoleMap = {
   OWNER: ALL,
-  ADMIN: [
-    'members.view',
-    'members.manage',
-    'product.view',
-    'product.create',
-    'product.edit',
-    'product.delete',
-    'stock.adjust',
-    'sale.record',
-    'order.manage',
-    'expense.manage',
-    'finance.view',
-    'notice.manage',
-  ],
   MANAGER: [
     'members.view',
+    'members.manage',
+    'hours.manage',
     'product.view',
     'product.create',
     'product.edit',
     'stock.adjust',
     'sale.record',
+    'order.view',
     'order.manage',
+    'delivery.perform',
     'expense.manage',
   ],
-  ACCOUNTANT: [
-    'product.view',
-    'expense.manage',
-    'finance.view',
-  ],
-  STAFF: [
+  ACCOUNTANT: ['product.view', 'order.view', 'expense.manage', 'finance.view'],
+  ATTENDANT: [
     'product.view',
     'sale.record',
+    'order.view',
     'order.manage',
+    'delivery.perform',
   ],
+  RIDER: ['delivery.perform'],
   MEMBER: [],
 };
 
 const WORSHIP: RoleMap = {
-  OWNER: ALL,
   SUPER_ADMIN: ALL,
   ADMIN: [
     'members.view',
     'members.manage',
     'notice.manage',
     'email.broadcast',
+    'hours.manage',
     'giving.manage',
     'attendance.mark',
     'event.manage',
-  ],
-  MODERATOR: [
-    'members.view',
-    'notice.manage',
-    'attendance.mark',
   ],
   MEMBER: [],
 };
@@ -143,18 +106,9 @@ const GENERIC: RoleMap = {
     'members.manage',
     'notice.manage',
     'email.broadcast',
+    'hours.manage',
     'event.manage',
   ],
-  MANAGER: [
-    'members.view',
-    'notice.manage',
-    'event.manage',
-  ],
-  MODERATOR: [
-    'members.view',
-    'notice.manage',
-  ],
-  STAFF: [],
   MEMBER: [],
 };
 
@@ -183,9 +137,9 @@ export const TOP_ROLE: Record<OrgType, R> = {
 export const allowedRoles = (type: OrgType): R[] =>
   Object.keys(ORG_PERMISSIONS[type]) as R[];
 
-export const hasPermission = (
-  type: OrgType,
-  role: R,
-  permission: Permission,
-): boolean =>
-  ORG_PERMISSIONS[type][role]?.includes(permission) ?? false;
+export const hasPermission = (type: OrgType, role: R, p: Permission): boolean =>
+  ORG_PERMISSIONS[type][role]?.includes(p) ?? false;
+
+/** Every role of this org type that holds the permission. */
+export const rolesWith = (type: OrgType, p: Permission): R[] =>
+  allowedRoles(type).filter((role) => hasPermission(type, role, p));

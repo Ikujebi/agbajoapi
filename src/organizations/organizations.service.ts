@@ -1,4 +1,3 @@
-
 import {
   BadRequestException,
   ConflictException,
@@ -16,7 +15,15 @@ import {
 
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
+import { PermissionsService } from '../common/permissions/permissions.service';
 import {
+  TOP_ROLE,
+  allowedRoles,
+  rolesWith,
+} from '../common/permissions/permissions';
+import { AuthUser } from '../common/decorators/current-user.decorator';
+import {
+  AddMemberDto,
   BroadcastEmailDto,
   CreateOrgDto,
   JoinOrgDto,
@@ -41,10 +48,12 @@ export class OrganizationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly mail: MailService,
+    private readonly permissions: PermissionsService,
   ) {}
 
   /**
-   * Requires an approved membership with one of the specified roles.
+   * Legacy role check. Kept so older callers still compile.
+   * New code should use PermissionsService.assert() instead.
    */
   async assertRole(
     userId: string,
@@ -85,6 +94,32 @@ export class OrganizationsService {
     return organization;
   }
 
+  /**
+   * Role changes must respect the organization type and the actor's rank.
+   * actorRole === null means the actor is a platform super admin.
+   */
+  private assertCanAssign(
+    orgType: OrgType,
+    actorRole: MembershipRole | null,
+    targetRole: MembershipRole,
+    currentRole?: MembershipRole,
+  ): void {
+    if (!allowedRoles(orgType).includes(targetRole)) {
+      throw new BadRequestException(
+        `Role ${targetRole} is not available for ${orgType} organizations.`,
+      );
+    }
+
+    const top = TOP_ROLE[orgType];
+    const actorIsTop = actorRole === null || actorRole === top;
+
+    if (!actorIsTop && (targetRole === top || currentRole === top)) {
+      throw new ForbiddenException(
+        `Only the ${top} can assign or change the ${top} role.`,
+      );
+    }
+  }
+
   async create(userId: string, dto: CreateOrgDto) {
     try {
       return await this.prisma.organization.create({
@@ -93,8 +128,9 @@ export class OrganizationsService {
           memberships: {
             create: {
               userId,
-              role: MembershipRole.ADMIN,
+              role: TOP_ROLE[dto.type],
               status: MembershipStatus.APPROVED,
+              joinedAt: new Date(),
             },
           },
         },
@@ -149,7 +185,7 @@ export class OrganizationsService {
 
     if (organization.type === OrgType.SHOP) {
       throw new BadRequestException(
-        'Shop organizations do not accept memberships through this endpoint.',
+        'Shops add their staff directly. Ask the owner or manager to add you.',
       );
     }
 
@@ -177,10 +213,8 @@ export class OrganizationsService {
           organizationId: orgId,
           unit: dto.unit,
           status: MembershipStatus.PENDING,
-          role:
-            organization.type === OrgType.ESTATE
-              ? MembershipRole.RESIDENT
-              : MembershipRole.MEMBER,
+          // Residents are MEMBERs; the unit field records where they live.
+          role: MembershipRole.MEMBER,
         },
       });
     } catch (error: unknown) {
@@ -197,21 +231,20 @@ export class OrganizationsService {
       throw error;
     }
 
-    const admins = await this.prisma.membership.findMany({
+    // Notify everyone who is allowed to approve requests.
+    const approvers = await this.prisma.membership.findMany({
       where: {
         organizationId: orgId,
-        role: {
-          in: [MembershipRole.ADMIN, MembershipRole.OWNER],
-        },
         status: MembershipStatus.APPROVED,
+        role: { in: rolesWith(organization.type, 'members.manage') },
       },
       select: { userId: true },
     });
 
-    if (admins.length > 0) {
+    if (approvers.length > 0) {
       await this.prisma.notification.createMany({
-        data: admins.map((admin) => ({
-          userId: admin.userId,
+        data: approvers.map((approver) => ({
+          userId: approver.userId,
           title: 'New join request',
           body: `A new user has requested to join ${organization.name}.`,
         })),
@@ -221,15 +254,69 @@ export class OrganizationsService {
     return membership;
   }
 
+  /**
+   * Directly add a user by phone number (shop attendants, estate security, ...).
+   */
+  async addMember(user: AuthUser, orgId: string, dto: AddMemberDto) {
+    const organization = await this.getOrThrow(orgId);
+    const actor = await this.permissions.assert(user, orgId, 'members.manage');
+
+    this.assertCanAssign(organization.type, actor?.role ?? null, dto.role);
+
+    const target = await this.prisma.user.findUnique({
+      where: { phone: dto.phone },
+      select: { id: true, isActive: true },
+    });
+
+    if (!target || !target.isActive) {
+      throw new NotFoundException(
+        'No active user found with that phone number.',
+      );
+    }
+
+    try {
+      const membership = await this.prisma.membership.create({
+        data: {
+          userId: target.id,
+          organizationId: orgId,
+          role: dto.role,
+          title: dto.title,
+          status: MembershipStatus.APPROVED,
+          joinedAt: new Date(),
+        },
+      });
+
+      await this.prisma.notification.create({
+        data: {
+          userId: target.id,
+          title: 'Added to an organization',
+          body: `You were added to ${organization.name} as ${dto.role
+            .toLowerCase()
+            .replace(/_/g, ' ')}.`,
+        },
+      });
+
+      return membership;
+    } catch (error: unknown) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'That user already has a membership in this organization.',
+        );
+      }
+
+      throw error;
+    }
+  }
+
   async listMembers(
-    userId: string,
+    user: AuthUser,
     orgId: string,
     status?: MembershipStatus,
   ) {
-    await this.assertRole(userId, orgId, [
-      MembershipRole.ADMIN,
-      MembershipRole.OWNER,
-    ]);
+    await this.permissions.assert(user, orgId, 'members.view');
 
     return this.prisma.membership.findMany({
       where: {
@@ -251,15 +338,13 @@ export class OrganizationsService {
   }
 
   async review(
-    adminId: string,
+    user: AuthUser,
     orgId: string,
     membershipId: string,
     dto: ReviewMembershipDto,
   ) {
-    await this.assertRole(adminId, orgId, [
-      MembershipRole.ADMIN,
-      MembershipRole.OWNER,
-    ]);
+    const organization = await this.getOrThrow(orgId);
+    const actor = await this.permissions.assert(user, orgId, 'members.manage');
 
     const membership = await this.prisma.membership.findFirst({
       where: {
@@ -288,7 +373,7 @@ export class OrganizationsService {
     }
 
     if (
-      membership.userId === adminId &&
+      membership.userId === user.id &&
       (dto.status !== MembershipStatus.APPROVED ||
         (dto.role !== undefined && dto.role !== membership.role))
     ) {
@@ -297,11 +382,22 @@ export class OrganizationsService {
       );
     }
 
+    // Runs even for status-only changes, so a manager cannot suspend the owner.
+    this.assertCanAssign(
+      organization.type,
+      actor?.role ?? null,
+      dto.role ?? membership.role,
+      membership.role,
+    );
+
     const updated = await this.prisma.membership.update({
       where: { id: membership.id },
       data: {
         status: dto.status,
         ...(dto.role !== undefined ? { role: dto.role } : {}),
+        ...(dto.status === MembershipStatus.APPROVED && !membership.joinedAt
+          ? { joinedAt: new Date() }
+          : {}),
       },
     });
 
@@ -334,14 +430,11 @@ export class OrganizationsService {
   }
 
   async broadcastEmail(
-    adminId: string,
+    user: AuthUser,
     orgId: string,
     dto: BroadcastEmailDto,
   ) {
-    await this.assertRole(adminId, orgId, [
-      MembershipRole.ADMIN,
-      MembershipRole.OWNER,
-    ]);
+    await this.permissions.assert(user, orgId, 'email.broadcast');
 
     const organization = await this.getOrThrow(orgId);
 
@@ -378,7 +471,7 @@ export class OrganizationsService {
     await this.prisma.emailCampaign.create({
       data: {
         organizationId: orgId,
-        senderId: adminId,
+        senderId: user.id,
         subject: dto.subject,
         body: dto.body,
         recipientCount: sent,

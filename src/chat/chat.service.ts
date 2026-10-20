@@ -1,4 +1,3 @@
-
 import {
   BadRequestException,
   ForbiddenException,
@@ -9,11 +8,11 @@ import {
   ChatPrivacy,
   ConversationStatus,
   ConversationType,
-  MembershipRole,
   MembershipStatus,
   Prisma,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { hasPermission } from '../common/permissions/permissions';
 
 export type ChatVerdict = 'ALLOWED' | 'REQUEST' | 'DENIED';
 
@@ -127,35 +126,27 @@ export class ChatService {
    * Returns true when adminId is an approved organization owner/admin
    * and memberId has an approved membership in the same organization.
    */
-  private async isAdminOfOrgWhereMember(
-    adminId: string,
-    memberId: string,
-  ): Promise<boolean> {
+  private async isAdminOfOrgWhereMember(adminId: string, memberId: string) {
     const adminMemberships = await this.prisma.membership.findMany({
-      where: {
-        userId: adminId,
-        role: {
-          in: [
-            MembershipRole.ADMIN,
-            MembershipRole.OWNER,
-          ],
-        },
-        status: MembershipStatus.APPROVED,
+      where: { userId: adminId, status: MembershipStatus.APPROVED },
+      select: {
+        organizationId: true,
+        role: true,
+        organization: { select: { type: true } },
       },
-      select: { organizationId: true },
     });
 
-    if (adminMemberships.length === 0) {
-      return false;
-    }
+    const managed = adminMemberships
+      .filter((m) => hasPermission(m.organization.type, m.role, 'members.manage'))
+      .map((m) => m.organizationId);
+
+    if (managed.length === 0) return false;
 
     const membership = await this.prisma.membership.findFirst({
       where: {
         userId: memberId,
         status: MembershipStatus.APPROVED,
-        organizationId: {
-          in: adminMemberships.map((item) => item.organizationId),
-        },
+        organizationId: { in: managed },
       },
       select: { id: true },
     });
@@ -272,26 +263,31 @@ export class ChatService {
   async send(
     senderId: string,
     recipientId: string,
-    text: string,
+    text?: string,
+    media?: {
+      url: string;
+      type: import('@prisma/client').MessageType;
+      fileName?: string;
+      mimeType?: string;
+      size?: number;
+      publicId?: string;
+    },
   ) {
     if (senderId === recipientId) {
-      throw new BadRequestException(
-        'You cannot message yourself',
-      );
+      throw new BadRequestException('You cannot message yourself');
     }
 
-    if (typeof text !== 'string' || text.trim().length === 0) {
-      throw new BadRequestException(
-        'Message cannot be empty',
-      );
+    const body = typeof text === 'string' ? text.trim() : '';
+    if (!body && !media?.url) {
+      throw new BadRequestException('Message must contain text or a media file');
     }
-
-    const body = text.trim();
-
     if (body.length > MAX_MESSAGE_LENGTH) {
       throw new BadRequestException(
         `Message cannot exceed ${MAX_MESSAGE_LENGTH} characters`,
       );
+    }
+    if (media && (!media.url || !media.type)) {
+      throw new BadRequestException('A valid media URL and type are required');
     }
 
     await Promise.all([
@@ -434,7 +430,13 @@ export class ChatService {
         data: {
           conversationId: conversation.id,
           senderId,
-          body,
+          body: body || null,
+          type: media?.type ?? 'TEXT',
+          mediaUrl: media?.url ?? null,
+          mediaPublicId: media?.publicId ?? null,
+          mediaFileName: media?.fileName ?? null,
+          mediaMimeType: media?.mimeType ?? null,
+          mediaSize: media?.size ?? null,
         },
       });
 
@@ -450,6 +452,104 @@ export class ChatService {
       message,
       conversation,
     };
+  }
+
+
+  /**
+   * Edits the sender's message only during the first 60 seconds.
+   * The database update is conditional, so an expired edit window cannot
+   * be bypassed by a client-side clock.
+   */
+  async updateMessage(userId: string, messageId: string, newText: string) {
+    const body = typeof newText === 'string' ? newText.trim() : '';
+    if (!body) {
+      throw new BadRequestException('Updated message body cannot be empty');
+    }
+    if (body.length > MAX_MESSAGE_LENGTH) {
+      throw new BadRequestException(
+        `Message cannot exceed ${MAX_MESSAGE_LENGTH} characters`,
+      );
+    }
+
+    const message = await this.prisma.message.findUnique({
+      where: { id: messageId },
+      include: { conversation: true },
+    });
+    if (!message || message.deletedAt) {
+      throw new NotFoundException('Message not found');
+    }
+    if (message.senderId !== userId) {
+      throw new ForbiddenException('You can only edit your own messages');
+    }
+
+    this.assertDirectConversation(message.conversation);
+    if (![message.conversation.userAId, message.conversation.userBId].includes(userId)) {
+      throw new NotFoundException('Message not found');
+    }
+    if (message.conversation.status !== ConversationStatus.ACTIVE) {
+      throw new ForbiddenException('This conversation is not active');
+    }
+    if (await this.isBlocked(message.conversation.userAId, message.conversation.userBId)) {
+      throw new ForbiddenException('Messaging is blocked between these users');
+    }
+
+    const cutoff = new Date(Date.now() - 60_000);
+    const now = new Date();
+    const result = await this.prisma.message.updateMany({
+      where: {
+        id: messageId,
+        senderId: userId,
+        deletedAt: null,
+        createdAt: { gte: cutoff },
+      },
+      data: { body, isEdited: true, editedAt: now },
+    });
+    if (result.count !== 1) {
+      throw new BadRequestException('Messages can only be edited within 1 minute of sending');
+    }
+
+    return this.prisma.message.findUniqueOrThrow({ where: { id: messageId } });
+  }
+
+  /**
+   * Soft-deletes a message authored by the requesting user.
+   * Media is hidden from chat history; asset cleanup can be performed separately.
+   */
+  async deleteMessage(userId: string, messageId: string) {
+    const message = await this.prisma.message.findUnique({
+      where: { id: messageId },
+      include: { conversation: true },
+    });
+    if (!message || message.deletedAt) {
+      throw new NotFoundException('Message not found');
+    }
+    if (message.senderId !== userId) {
+      throw new ForbiddenException('You can only delete your own messages');
+    }
+
+    this.assertDirectConversation(message.conversation);
+    if (![message.conversation.userAId, message.conversation.userBId].includes(userId)) {
+      throw new NotFoundException('Message not found');
+    }
+
+    const deletedAt = new Date();
+    const result = await this.prisma.message.updateMany({
+      where: { id: messageId, senderId: userId, deletedAt: null },
+      data: {
+        deletedAt,
+        body: null,
+        mediaUrl: null,
+        mediaPublicId: null,
+        mediaFileName: null,
+        mediaMimeType: null,
+        mediaSize: null,
+      },
+    });
+    if (result.count !== 1) {
+      throw new NotFoundException('Message not found');
+    }
+
+    return { id: messageId, conversationId: message.conversationId, deletedAt };
   }
 
   /**

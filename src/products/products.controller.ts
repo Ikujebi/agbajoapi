@@ -1,4 +1,3 @@
-
 import {
   Body,
   Controller,
@@ -36,9 +35,6 @@ export class ProductsController {
    * Optional filters: orgId, q, inStock.
    *
    * GET /api/products
-   * GET /api/products?orgId=<uuid>
-   * GET /api/products?q=rice
-   * GET /api/products?inStock=true
    */
   @Get('products')
   list(
@@ -60,7 +56,8 @@ export class ProductsController {
     @Param('orgId', ParseUUIDPipe) orgId: string,
     @Body() dto: CreateProductDto,
   ) {
-    return this.productsService.create(user.id, orgId, dto);
+    // PASS `user` INSTEAD OF `user.id`
+    return this.productsService.create(user, orgId, dto);
   }
 
   /**
@@ -74,7 +71,8 @@ export class ProductsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateProductDto,
   ) {
-    return this.productsService.update(user.id, id, dto);
+    // PASS `user` INSTEAD OF `user.id`
+    return this.productsService.update(user, id, dto);
   }
 
   /**
@@ -88,7 +86,8 @@ export class ProductsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: StockAdjustDto,
   ) {
-    return this.productsService.adjustStock(user.id, id, dto);
+    // PASS `user` INSTEAD OF `user.id`
+    return this.productsService.adjustStock(user, id, dto);
   }
 
   /**
@@ -101,6 +100,7 @@ export class ProductsController {
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
   ) {
-    return this.productsService.movements(user.id, id);
+    // PASS `user` INSTEAD OF `user.id`
+    return this.productsService.movements(user, id);
   }
 }

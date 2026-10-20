@@ -27,7 +27,7 @@ export class VisitorsController {
     @CurrentUser() user: AuthUser,
     @Body() dto: CreatePassDto,
   ) {
-    return this.visitorsService.create(user.id, dto);
+    return this.visitorsService.create(user, dto);
   }
 
   @Get('mine')
@@ -48,7 +48,7 @@ export class VisitorsController {
     @CurrentUser() user: AuthUser,
     @Body() dto: VerifyPassDto,
   ) {
-    return this.visitorsService.verify(user.id, dto);
+    return this.visitorsService.verify(user, dto);
   }
 
   @Post('exit')
@@ -56,7 +56,7 @@ export class VisitorsController {
     @CurrentUser() user: AuthUser,
     @Body() dto: VerifyPassDto,
   ) {
-    return this.visitorsService.exit(user.id, dto);
+   return this.visitorsService.exit(user, dto);
   }
 
   @Get('log/:organizationId')
@@ -64,6 +64,6 @@ export class VisitorsController {
     @CurrentUser() user: AuthUser,
     @Param('organizationId') organizationId: string,
   ) {
-    return this.visitorsService.gateLog(user.id, organizationId);
+    return this.visitorsService.gateLog(user, organizationId);
   }
 }

@@ -1,19 +1,17 @@
-
 import {
   BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import {
-  MembershipRole,
-  Prisma,
-  StockMovementType,
-} from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { createHash, randomInt } from 'crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { OrganizationsService } from '../organizations/organizations.service';
+import { PermissionsService } from '../common/permissions/permissions.service';
+import { Permission } from '../common/permissions/permissions';
+import { AuthUser } from '../common/decorators/current-user.decorator';
 import { CreatePassDto, VerifyPassDto } from './dto';
 
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -29,11 +27,17 @@ export class VisitorsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly orgs: OrganizationsService,
+    private readonly permissions: PermissionsService,
+    private readonly hours: OrganizationsService,
   ) {}
 
-  private async assertEstateStaff(
-    userId: string,
+  /**
+   * Verify the organization is an estate and the user holds the permission.
+   */
+  private async assertEstate(
+    user: AuthUser,
     organizationId: string,
+    permission: Permission,
   ): Promise<void> {
     const organization = await this.orgs.getOrThrow(organizationId);
 
@@ -43,19 +47,13 @@ export class VisitorsService {
       );
     }
 
-    const roles: MembershipRole[] = [
-      MembershipRole.RESIDENT,
-      MembershipRole.ADMIN,
-      MembershipRole.OWNER,
-      MembershipRole.SECURITY,
-    ];
-
-    await this.orgs.assertRole(userId, organizationId, roles);
+    await this.permissions.assert(user, organizationId, permission);
   }
 
-  async create(hostId: string, dto: CreatePassDto) {
-    await this.assertEstateStaff(hostId, dto.organizationId);
+  async create(user: AuthUser, dto: CreatePassDto) {
+    await this.assertEstate(user, dto.organizationId, 'visitor.create');
 
+    const hostId = user.id;
     const validFrom = new Date(dto.validFrom);
     const validUntil = new Date(dto.validUntil);
 
@@ -72,9 +70,7 @@ export class VisitorsService {
     const maxEntries = dto.maxEntries ?? 1;
 
     if (!Number.isInteger(maxEntries) || maxEntries < 1) {
-      throw new BadRequestException(
-        'maxEntries must be a positive integer.',
-      );
+      throw new BadRequestException('maxEntries must be a positive integer.');
     }
 
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -87,6 +83,7 @@ export class VisitorsService {
             codeHash,
             organizationId: dto.organizationId,
             hostId,
+            createdById: hostId,
             visitorName: dto.visitorName.trim(),
             visitorPhone: dto.visitorPhone?.trim(),
             purpose: dto.purpose?.trim(),
@@ -94,10 +91,10 @@ export class VisitorsService {
             validUntil,
             maxEntries,
           },
+          omit: { codeHash: true },
         });
 
-        // Return the readable code only when the pass is created.
-        // Never return the stored hash.
+        // The readable code is returned only once, at creation.
         return { ...pass, code };
       } catch (error: unknown) {
         if (
@@ -122,7 +119,6 @@ export class VisitorsService {
       where: { hostId },
       orderBy: { createdAt: 'desc' },
       take: 100,
-      // codeHash is not returned to the client.
       omit: { codeHash: true },
     });
   }
@@ -146,14 +142,15 @@ export class VisitorsService {
 
     return this.prisma.visitorPass.update({
       where: { id },
-      data: { status: 'REVOKED' },
+      data: { status: 'REVOKED', revokedAt: new Date() },
       omit: { codeHash: true },
     });
   }
 
-  async verify(securityId: string, dto: VerifyPassDto) {
-    await this.assertEstateStaff(securityId, dto.organizationId);
+  async verify(user: AuthUser, dto: VerifyPassDto) {
+    await this.assertEstate(user, dto.organizationId, 'visitor.verify');
 
+    const securityId = user.id;
     const code = dto.code.trim().toUpperCase();
 
     const pass = await this.prisma.visitorPass.findFirst({
@@ -213,9 +210,7 @@ export class VisitorsService {
         data: {
           entriesUsed: { increment: 1 },
           status:
-            pass.entriesUsed + 1 >= pass.maxEntries
-              ? 'COMPLETED'
-              : 'ACTIVE',
+            pass.entriesUsed + 1 >= pass.maxEntries ? 'COMPLETED' : 'ACTIVE',
         },
       });
 
@@ -260,8 +255,8 @@ export class VisitorsService {
     };
   }
 
-  async exit(securityId: string, dto: VerifyPassDto) {
-    await this.assertEstateStaff(securityId, dto.organizationId);
+  async exit(user: AuthUser, dto: VerifyPassDto) {
+    await this.assertEstate(user, dto.organizationId, 'visitor.verify');
 
     const pass = await this.prisma.visitorPass.findFirst({
       where: {
@@ -278,7 +273,7 @@ export class VisitorsService {
       data: {
         organizationId: pass.organizationId,
         passId: pass.id,
-        securityId,
+        securityId: user.id,
         action: 'EXIT',
         visitorName: pass.visitorName,
       },
@@ -290,8 +285,8 @@ export class VisitorsService {
     };
   }
 
-  async gateLog(userId: string, organizationId: string) {
-    await this.assertEstateStaff(userId, organizationId);
+  async gateLog(user: AuthUser, organizationId: string) {
+    await this.assertEstate(user, organizationId, 'gate.view');
 
     return this.prisma.gateLog.findMany({
       where: { organizationId },
@@ -309,4 +304,5 @@ export class VisitorsService {
       take: 200,
     });
   }
+  
 }

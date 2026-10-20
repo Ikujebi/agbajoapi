@@ -1,13 +1,6 @@
-
 import {
-  ConnectedSocket,
-  MessageBody,
-  OnGatewayConnection,
-  OnGatewayDisconnect,
-  SubscribeMessage,
-  WebSocketGateway,
-  WebSocketServer,
-  WsException,
+  ConnectedSocket, MessageBody, OnGatewayConnection, OnGatewayDisconnect,
+  SubscribeMessage, WebSocketGateway, WebSocketServer, WsException,
 } from '@nestjs/websockets';
 import { UsePipes, ValidationPipe } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -17,40 +10,20 @@ import { ChatService } from './chat.service';
 import { SendMessageDto } from './dto';
 
 interface AuthenticatedSocket extends Socket {
-  data: {
-    userId?: string;
-  };
+  data: { userId?: string };
 }
-
-interface AccessTokenPayload {
-  sub?: string;
-}
+interface AccessTokenPayload { sub?: string; }
 
 const allowedOrigins = (process.env.CORS_ORIGINS ?? '')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+  .split(',').map((origin) => origin.trim()).filter(Boolean);
 
 @WebSocketGateway({
   namespace: '/chat',
-  cors: {
-    origin: allowedOrigins,
-    credentials: true,
-  },
+  cors: { origin: allowedOrigins, credentials: true },
 })
-@UsePipes(
-  new ValidationPipe({
-    whitelist: true,
-    forbidNonWhitelisted: true,
-    transform: true,
-  }),
-)
-export class ChatGateway
-  implements OnGatewayConnection, OnGatewayDisconnect
-{
-  @WebSocketServer()
-  server!: Server;
-
+@UsePipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }))
+export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
+  @WebSocketServer() server!: Server;
   private readonly messageTimes = new Map<string, number[]>();
   private readonly maxMessagesPerMinute = 20;
 
@@ -63,22 +36,12 @@ export class ChatGateway
   async handleConnection(client: AuthenticatedSocket): Promise<void> {
     try {
       const token: unknown = client.handshake.auth?.token;
-
-      if (typeof token !== 'string' || token.length === 0) {
-        throw new Error('Missing access token');
-      }
-
+      if (typeof token !== 'string' || !token) throw new Error('Missing access token');
       const payload = await this.jwt.verifyAsync<AccessTokenPayload>(token, {
         secret: this.config.getOrThrow<string>('JWT_ACCESS_SECRET'),
       });
-
-      if (typeof payload.sub !== 'string' || !payload.sub) {
-        throw new Error('Invalid token subject');
-      }
-
-      // Prevent inactive or deleted accounts from opening a chat socket.
+      if (typeof payload.sub !== 'string' || !payload.sub) throw new Error('Invalid token subject');
       await this.chat.assertSocketUserActive(payload.sub);
-
       client.data.userId = payload.sub;
       await client.join(this.userRoom(payload.sub));
     } catch {
@@ -89,44 +52,27 @@ export class ChatGateway
   handleDisconnect(client: AuthenticatedSocket): void {
     const userId = client.data.userId;
     if (!userId || !this.server) return;
-
     const hasOtherSockets = [...this.server.sockets.sockets.values()].some(
-      (socket) =>
-        (socket as AuthenticatedSocket).data.userId === userId,
+      (socket) => (socket as AuthenticatedSocket).data.userId === userId,
     );
-
-    if (!hasOtherSockets) {
-      this.messageTimes.delete(userId);
-    }
+    if (!hasOtherSockets) this.messageTimes.delete(userId);
   }
 
-  private userRoom(userId: string): string {
-    return `user:${userId}`;
-  }
+  private userRoom(userId: string): string { return `user:${userId}`; }
 
   private requireUser(client: AuthenticatedSocket): string {
     const userId = client.data.userId;
-
-    if (!userId) {
-      throw new WsException('Authentication required');
-    }
-
+    if (!userId) throw new WsException('Authentication required');
     return userId;
   }
 
   private checkRateLimit(userId: string): void {
     const now = Date.now();
-    const cutoff = now - 60_000;
-
-    const recent = (this.messageTimes.get(userId) ?? []).filter(
-      (time) => time > cutoff,
-    );
-
+    const recent = (this.messageTimes.get(userId) ?? []).filter((time) => time > now - 60_000);
     if (recent.length >= this.maxMessagesPerMinute) {
       this.messageTimes.set(userId, recent);
       throw new WsException('Too many messages. Please try again shortly.');
     }
-
     recent.push(now);
     this.messageTimes.set(userId, recent);
   }
@@ -134,154 +80,103 @@ export class ChatGateway
   private errorResponse(error: unknown) {
     if (error instanceof WsException) {
       const response = error.getError();
-
-      return {
-        ok: false,
-        error:
-          typeof response === 'string'
-            ? response
-            : 'Invalid WebSocket request',
-      };
+      return { ok: false, error: typeof response === 'string' ? response : 'Invalid WebSocket request' };
     }
-
-    // Nest HTTP exceptions thrown by the shared service can safely return
-    // their client-facing message. Never return arbitrary internal errors.
-    if (
-      typeof error === 'object' &&
-      error !== null &&
-      'getStatus' in error &&
-      typeof error.getStatus === 'function' &&
-      'message' in error &&
-      typeof error.message === 'string'
-    ) {
+    if (typeof error === 'object' && error !== null &&
+      'getStatus' in error && typeof error.getStatus === 'function' &&
+      'message' in error && typeof error.message === 'string') {
       const status = error.getStatus();
-
-      if (status >= 400 && status < 500) {
-        return { ok: false, error: error.message };
-      }
+      if (status >= 400 && status < 500) return { ok: false, error: error.message };
     }
-
     return { ok: false, error: 'Unable to process chat request' };
   }
 
   @SubscribeMessage('message:send')
-  async onSend(
-    @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() body: SendMessageDto,
-  ) {
+  async onSend(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() body: SendMessageDto) {
     try {
       const senderId = this.requireUser(client);
       this.checkRateLimit(senderId);
-
-      const result = await this.chat.send(
-        senderId,
-        body.recipientId,
-        body.text,
-      );
-
+      const result = await this.chat.send(senderId, body.recipientId, body.text);
       this.publishMessage(senderId, body.recipientId, result);
-
       return { ok: true, ...result };
-    } catch (error) {
-      return this.errorResponse(error);
-    }
+    } catch (error) { return this.errorResponse(error); }
+  }
+
+  @SubscribeMessage('message:edit')
+  async onEdit(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() body: { messageId: string; text: string }) {
+    try {
+      const userId = this.requireUser(client);
+      if (!body || typeof body.messageId !== 'string' || typeof body.text !== 'string') {
+        throw new WsException('Invalid edit payload');
+      }
+      const message = await this.chat.updateMessage(userId, body.messageId, body.text);
+      const participants = await this.chat.getConversationParticipants(userId, message.conversationId);
+      this.publishMessageUpdate(participants.userAId, participants.userBId, message);
+      return { ok: true, message };
+    } catch (error) { return this.errorResponse(error); }
+  }
+
+  @SubscribeMessage('message:delete')
+  async onDelete(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() body: { messageId: string }) {
+    try {
+      const userId = this.requireUser(client);
+      if (!body || typeof body.messageId !== 'string') throw new WsException('Invalid delete payload');
+      const result = await this.chat.deleteMessage(userId, body.messageId);
+      const participants = await this.chat.getConversationParticipants(userId, result.conversationId);
+      this.publishMessageDelete(participants.userAId, participants.userBId, result.conversationId, result.id, result.deletedAt);
+      return { ok: true, ...result };
+    } catch (error) { return this.errorResponse(error); }
   }
 
   @SubscribeMessage('conversation:request:respond')
-  async onRespondToRequest(
-    @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody()
-    body: { conversationId: string; accept: boolean },
-  ) {
+  async onRespondToRequest(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() body: { conversationId: string; accept: boolean }) {
     try {
       const userId = this.requireUser(client);
-
-      if (
-        !body ||
-        typeof body.conversationId !== 'string' ||
-        typeof body.accept !== 'boolean'
-      ) {
-        throw new WsException('Invalid request payload');
-      }
-
-      const conversation = await this.chat.respondToRequest(
-        userId,
-        body.conversationId,
-        body.accept,
-      );
-
-      this.publishConversationUpdate(
-        conversation.userAId,
-        conversation.userBId,
-        conversation,
-      );
-
+      if (!body || typeof body.conversationId !== 'string' || typeof body.accept !== 'boolean') throw new WsException('Invalid request payload');
+      const conversation = await this.chat.respondToRequest(userId, body.conversationId, body.accept);
+      this.publishConversationUpdate(conversation.userAId, conversation.userBId, conversation);
       return { ok: true, conversation };
-    } catch (error) {
-      return this.errorResponse(error);
-    }
+    } catch (error) { return this.errorResponse(error); }
   }
 
   @SubscribeMessage('conversation:read')
-  async onRead(
-    @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() body: { conversationId: string },
-  ) {
+  async onRead(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() body: { conversationId: string }) {
     try {
       const userId = this.requireUser(client);
-
-      if (!body || typeof body.conversationId !== 'string') {
-        throw new WsException('Invalid conversation ID');
-      }
-
-      const result = await this.chat.markRead(
-        userId,
-        body.conversationId,
-      );
-
-      const participants = await this.chat.getConversationParticipants(
-        userId,
-        body.conversationId,
-      );
-
-      this.server
-        .to(this.userRoom(participants.otherUserId))
-        .emit('message:read', result);
-
+      if (!body || typeof body.conversationId !== 'string') throw new WsException('Invalid conversation ID');
+      const result = await this.chat.markRead(userId, body.conversationId);
+      const participants = await this.chat.getConversationParticipants(userId, body.conversationId);
+      this.server.to(this.userRoom(participants.otherUserId)).emit('message:read', result);
       return { ok: true, ...result };
-    } catch (error) {
-      return this.errorResponse(error);
-    }
+    } catch (error) { return this.errorResponse(error); }
   }
 
-  publishMessage(
-    senderId: string,
-    recipientId: string,
-    payload: unknown,
-  ): void {
-    this.server
-      .to(this.userRoom(senderId))
-      .to(this.userRoom(recipientId))
-      .emit('message:new', payload);
+  publishMessage(senderId: string, recipientId: string, payload: unknown): void {
+    this.server.to(this.userRoom(senderId)).to(this.userRoom(recipientId)).emit('message:new', payload);
   }
 
-  publishConversationUpdate(
+  publishMessageUpdate(userAId: string, userBId: string, message: unknown): void {
+    this.server.to(this.userRoom(userAId)).to(this.userRoom(userBId)).emit('message:updated', message);
+  }
+
+  publishMessageDelete(
     userAId: string,
     userBId: string,
-    conversation: unknown,
+    conversationId: string,
+    messageId: string,
+    deletedAt: Date,
   ): void {
-    this.server
-      .to(this.userRoom(userAId))
-      .to(this.userRoom(userBId))
-      .emit('conversation:updated', { conversation });
+    this.server.to(this.userRoom(userAId)).to(this.userRoom(userBId)).emit(
+      'message:deleted',
+      { conversationId, messageId, deletedAt },
+    );
   }
 
-  publishReadReceipt(
-    recipientId: string,
-    payload: unknown,
-  ): void {
-    this.server
-      .to(this.userRoom(recipientId))
-      .emit('message:read', payload);
+  publishConversationUpdate(userAId: string, userBId: string, conversation: unknown): void {
+    this.server.to(this.userRoom(userAId)).to(this.userRoom(userBId)).emit('conversation:updated', { conversation });
+  }
+
+  publishReadReceipt(recipientId: string, payload: unknown): void {
+    this.server.to(this.userRoom(recipientId)).emit('message:read', payload);
   }
 }

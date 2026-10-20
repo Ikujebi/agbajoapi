@@ -37,16 +37,17 @@ export class OrganizationsController {
 
   @Get(':id/members')
   members(@CurrentUser() u: AuthUser, @Param('id') id: string, @Query('status') status?: MembershipStatus) {
-    return this.orgs.listMembers(u.id, id, status);
+    return this.orgs.listMembers(u, id, status);
+
   }
 
   @Patch(':id/members/:membershipId')
   review(@CurrentUser() u: AuthUser, @Param('id') id: string, @Param('membershipId') mid: string, @Body() dto: ReviewMembershipDto) {
-    return this.orgs.review(u.id, id, mid, dto);
+    return this.orgs.review(u, id, mid, dto);
   }
 
   @Post(':id/broadcast-email')
   broadcast(@CurrentUser() u: AuthUser, @Param('id') id: string, @Body() dto: BroadcastEmailDto) {
-    return this.orgs.broadcastEmail(u.id, id, dto);
+    return this.orgs.broadcastEmail(u, id, dto);
   }
 }

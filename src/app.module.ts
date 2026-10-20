@@ -1,8 +1,8 @@
-
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ScheduleModule } from '@nestjs/schedule';
 
 import { PrismaModule } from './prisma/prisma.module';
 import { MailModule } from './mail/mail.module';
@@ -13,10 +13,17 @@ import { ProductsModule } from './products/products.module';
 import { ChatModule } from './chat/chat.module';
 import { UsersModule } from './users/users.module';
 import { CloudinaryModule } from './cloudinary/cloudinary.module';
+import { PermissionsModule } from './common/permissions/permissions.module';
+import { OrdersModule } from './orders/orders.module';
+import { PaymentsModule } from './payments/payments.module';
+import { OrgHoursModule } from './org-hours/org-hours.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+
+    // Enable background cron jobs (e.g., unpaid order expiration)
+    ScheduleModule.forRoot(),
 
     // Rate limit: 100 requests per 60 seconds by default.
     ThrottlerModule.forRoot([
@@ -35,6 +42,10 @@ import { CloudinaryModule } from './cloudinary/cloudinary.module';
     ChatModule,
     UsersModule,
     CloudinaryModule,
+    PermissionsModule,
+    OrdersModule,
+    PaymentsModule,
+    OrgHoursModule,
   ],
   providers: [
     {
