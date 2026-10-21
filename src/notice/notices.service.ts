@@ -10,12 +10,14 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PermissionsService } from '../common/permissions/permissions.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 import { CreateNoticeDto, UpdateNoticeDto } from './dto/notice.dto';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Injectable()
 export class NoticesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly permissions: PermissionsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private parseExpiry(value?: string): Date | undefined {
@@ -31,38 +33,37 @@ export class NoticesService {
   }
 
   /** Tell every approved member (except the author) about a new notice. */
-  private async notifyMembers(
-    organizationId: string,
-    authorId: string,
-    noticeId: string,
-    title: string,
-  ) {
-    const organization = await this.prisma.organization.findUnique({
-      where: { id: organizationId },
-      select: { name: true },
-    });
+private async notifyMembers(
+  organizationId: string,
+  authorId: string,
+  noticeId: string,
+  title: string,
+) {
+  const organization = await this.prisma.organization.findUnique({
+    where: { id: organizationId },
+    select: { name: true },
+  });
 
-    const members = await this.prisma.membership.findMany({
-      where: {
-        organizationId,
-        status: 'APPROVED',
-        userId: { not: authorId },
-      },
-      select: { userId: true },
-    });
+  const members = await this.prisma.membership.findMany({
+    where: {
+      organizationId,
+      status: 'APPROVED',
+      userId: { not: authorId },
+    },
+    select: { userId: true },
+  });
 
-    if (members.length === 0) return;
+  if (members.length === 0) return;
 
-    await this.prisma.notification.createMany({
-      data: members.map((member) => ({
-        userId: member.userId,
-        type: 'GENERAL' as const,
-        title: `${organization?.name ?? 'Notice'}: ${title}`,
-        body: 'A new notice has been posted.',
-        data: { noticeId, organizationId },
-      })),
-    });
-  }
+  await this.notifications.send(
+    members.map((m) => m.userId),
+    {
+      title: `${organization?.name ?? 'Notice'}: ${title}`,
+      body: 'A new notice has been posted.',
+      data: { noticeId, organizationId },
+    },
+  );
+}
 
   async create(user: AuthUser, organizationId: string, dto: CreateNoticeDto) {
     await this.permissions.assert(user, organizationId, 'notice.manage');

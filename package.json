@@ -33,6 +33,7 @@
     "class-validator": "^0.14.4",
     "cloudinary": "^2.11.0",
     "dotenv": "^18.0.8",
+    "firebase-admin": "^14.5.0",
     "helmet": "^8.3.0",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
@@ -68,6 +69,8 @@
     "prisma@8.0.0-rc.23": true,
     "prisma@7.10.1": true,
     "@prisma/engines@7.10.1": true,
-    "@scarf/scarf@1.4.0": true
+    "@scarf/scarf@1.4.0": true,
+    "@firebase/util@1.15.3": true,
+    "protobufjs@7.6.6": true
   }
 }

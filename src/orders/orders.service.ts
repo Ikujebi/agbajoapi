@@ -28,7 +28,7 @@ import {
   UpdateDeliveryDto,
   UpdateOrderStatusDto,
 } from './dto';
-
+import { NotificationsService } from '../notifications/notifications.service';
 type Tx = Prisma.TransactionClient;
 
 /**
@@ -70,6 +70,7 @@ export class OrdersService {
     private readonly config: ConfigService,
     private readonly permissions: PermissionsService,
     private readonly hours: OrgHoursService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   // ---------- helpers ----------
@@ -97,18 +98,15 @@ export class OrdersService {
     return rows.map((r) => r.userId);
   }
 
-  private async notify(
-    userIds: string[],
-    type: NotificationType,
-    title: string,
-    body: string,
-    data?: Prisma.InputJsonValue,
-  ) {
-    if (!userIds.length) return;
-    await this.prisma.notification.createMany({
-      data: userIds.map((userId) => ({ userId, type, title, body, data })),
-    });
-  }
+ private async notify(
+  userIds: string[],
+  type: NotificationType,
+  title: string,
+  body: string,
+  data?: Record<string, string | number | null>,
+) {
+  await this.notifications.send(userIds, { type, title, body, data });
+}
 
   private newOrderNumber() {
     const d = new Date().toISOString().slice(2, 10).replace(/-/g, '');
@@ -681,4 +679,5 @@ export class OrdersService {
       }
     }
   }
+  
 }

@@ -64,3 +64,9 @@ Thumbs.db
 /.swc
 node_modules/
 dist/
+
+# Firebase service account credentials
+agbajo-5ddcb-firebase-adminsdk-fbsvc-07bc3d0a51.json
+serviceAccountKey.json
+firebase-service-account.json
+*-firebase-adminsdk-*.json
