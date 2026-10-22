@@ -102,7 +102,16 @@ enum SosStatus {
   RESOLVED
   CANCELLED
 }
+enum OtpPurpose {
+  PASSWORD_RESET
+  VERIFY_PHONE
+  VERIFY_EMAIL
+}
 
+enum OtpChannel {
+  SMS
+  EMAIL
+}
 enum ProductStatus {
   DRAFT
   ACTIVE
@@ -299,6 +308,7 @@ model User {
   sentMessages         Message[]
   notifications        Notification[]
   deviceTokens         DeviceToken[]
+  otpCodes             OtpCode[]
   blocksMade           Block[]              @relation("Blocker")
   blocksGot            Block[]              @relation("Blocked")
   conversationsA       Conversation[]       @relation("ConvoA")
@@ -1308,4 +1318,21 @@ model AuditLog {
   @@index([organizationId, createdAt])
   @@index([actorId, createdAt])
   @@index([entityType, entityId])
+}
+
+model OtpCode {
+  id         String     @id @default(uuid())
+  userId     String
+  purpose    OtpPurpose
+  channel    OtpChannel
+  codeHash   String
+  attempts   Int        @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose, createdAt])
+  @@index([expiresAt])
 }

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { NotificationType } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { RealtimeGateway } from './realtime.gateway';
 import { FcmService } from './fcm.service';
 
 export interface NotifyInput {
@@ -18,6 +19,7 @@ export class NotificationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly fcm: FcmService,
+    private readonly realtime: RealtimeGateway,
   ) {}
 
   /**
@@ -40,6 +42,15 @@ export class NotificationsService {
         body: input.body,
         data: input.data,
       })),
+    });
+
+    // Instant delivery to anyone with the app open.
+    this.realtime.emitToUsers(ids, 'notification:new', {
+      type,
+      title: input.title,
+      body: input.body,
+      data: input.data ?? null,
+      createdAt: new Date().toISOString(),
     });
 
     void this.push(ids, type, input).catch((error: Error) =>

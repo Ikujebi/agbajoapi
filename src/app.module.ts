@@ -19,6 +19,7 @@ import { PaymentsModule } from './payments/payments.module';
 import { OrgHoursModule } from './org-hours/org-hours.module';
 import {NoticesModule} from './notice/notices.module';
 import { SosModule } from './sos/sos.module';
+import {NotificationsModule} from './notifications/notifications.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -49,6 +50,7 @@ import { SosModule } from './sos/sos.module';
     OrgHoursModule,
     NoticesModule,
     SosModule,
+    NotificationsModule,
   ],
   providers: [
     {

@@ -1,17 +1,13 @@
-import {
-  Body,
-  Controller,
-  Get,
-  Post,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+
 import { AuthService } from './auth.service';
+import { LoginDto, RefreshDto, RegisterDto } from './dto';
 import {
-  LoginDto,
-  RefreshDto,
-  RegisterDto,
-} from './dto';
+  ChangePasswordDto,
+  ForgotPasswordDto,
+  ResetPasswordDto,
+} from './dto/password.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import {
   AuthUser,
@@ -48,5 +44,25 @@ export class AuthController {
   @Get('me')
   me(@CurrentUser() user: AuthUser) {
     return this.auth.me(user.id);
+  }
+
+  /** Sends a 6-digit code by SMS (phone) or email. Answers the same either way. */
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Post('password/forgot')
+  forgot(@Body() dto: ForgotPasswordDto) {
+    return this.auth.forgotPassword(dto.identifier);
+  }
+
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post('password/reset')
+  reset(@Body() dto: ResetPasswordDto) {
+    return this.auth.resetPassword(dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post('password/change')
+  change(@CurrentUser() user: AuthUser, @Body() dto: ChangePasswordDto) {
+    return this.auth.changePassword(user.id, dto);
   }
 }
