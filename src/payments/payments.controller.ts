@@ -7,7 +7,7 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { AuthUser, CurrentUser } from '../common/decorators/current-user.decorator';
 import { PaymentsService } from './payments.service';
-
+import {WalletController} from '../wallet/wallet.controller';
 @Controller('payments')
 export class PaymentsController {
   private readonly log = new Logger(PaymentsController.name);

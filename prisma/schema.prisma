@@ -6,6 +6,50 @@ datasource db {
   provider = "postgresql"
 }
 
+enum WalletTxType {
+  TOPUP
+  SMS_CHARGE
+  SMS_REFUND
+  ADJUSTMENT
+}
+
+enum SmsCampaignStatus {
+  SENDING
+  COMPLETED
+}
+
+enum PaymentPurpose {
+  ORDER
+  WALLET_FUNDING
+  WALLET_WITHDRAWAL
+  WALLET_TRANSFER
+  SERVICE_BOOKING
+  SERVICE_FEE
+  VISITOR_PASS
+  ESTATE_DUES
+  ESTATE_LEVY
+  RENT
+  UTILITY_BILL
+  MAINTENANCE
+  SECURITY_FEE
+  EVENT_TICKET
+  EVENT_REGISTRATION
+  CHURCH_GIVING
+  CHURCH_PLEDGE
+  DONATION
+  MARKETPLACE_PURCHASE
+  MARKETPLACE_COMMISSION
+  DELIVERY_FEE
+  SUBSCRIPTION
+  SMS_CREDITS
+  EMAIL_CREDITS
+  ADVERTISING
+  LISTING_FEE
+  BOOKING_DEPOSIT
+  REFUND
+  OTHER
+}
+
 enum OrgType {
   ESTATE
   SHOP
@@ -25,7 +69,6 @@ enum MessageType {
   FILE
   DOCUMENT
 }
-  
 
 enum MembershipRole {
   OWNER
@@ -102,6 +145,7 @@ enum SosStatus {
   RESOLVED
   CANCELLED
 }
+
 enum OtpPurpose {
   PASSWORD_RESET
   VERIFY_PHONE
@@ -112,6 +156,7 @@ enum OtpChannel {
   SMS
   EMAIL
 }
+
 enum ProductStatus {
   DRAFT
   ACTIVE
@@ -283,23 +328,23 @@ enum AuditAction {
 }
 
 model User {
-  id              String      @id @default(uuid())
-  fullName        String
-  email           String?     @unique
-  phone           String      @unique
-  passwordHash    String
-  avatarUrl       String?
-  avatarPublicId  String?
-  bio             String?
-  isSuperAdmin    Boolean     @default(false)
-  isActive        Boolean     @default(true)
-  emailVerifiedAt DateTime?
-  phoneVerifiedAt DateTime?
-  chatPrivacy     ChatPrivacy @default(EVERYONE)
-  lastSeenAt      DateTime?
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
-
+  id                   String               @id @default(uuid())
+  fullName             String
+  email                String?              @unique
+  phone                String               @unique
+  passwordHash         String
+  avatarUrl            String?
+  avatarPublicId       String?
+  bio                  String?
+  isSuperAdmin         Boolean              @default(false)
+  isActive             Boolean              @default(true)
+  emailVerifiedAt      DateTime?
+  phoneVerifiedAt      DateTime?
+  chatPrivacy          ChatPrivacy          @default(EVERYONE)
+  lastSeenAt           DateTime?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  smsCampaigns         SmsCampaign[]
   refreshTokens        RefreshToken[]
   memberships          Membership[]
   neighborhoodLinks    UserNeighborhood[]
@@ -427,6 +472,7 @@ model Organization {
   sosAlerts         SosAlert[]
   tickets           Ticket[]
   emailCampaigns    EmailCampaign[]
+  smsCampaigns      SmsCampaign[]
   expenses          Expense[]
   payouts           OrganizationPayout[]
   listings          MarketplaceListing[]
@@ -446,8 +492,9 @@ model Organization {
   deliveries        Delivery[]
   paymentRecords    Payment[]
   timezone          String                     @default("Africa/Lagos")
-  acceptingOrders   Boolean                    @default(true) // manual pause switch for shops
+  acceptingOrders   Boolean                    @default(true)
   hours             OrganizationHours[]
+  wallet            Wallet?
 
   @@index([type, name])
   @@index([city, state])
@@ -692,21 +739,22 @@ model OrderItem {
 }
 
 model Payment {
-  id             String        @id @default(uuid())
+  id             String         @id @default(uuid())
   organizationId String?
   orderId        String?
   payerId        String?
-  amount         Decimal       @db.Decimal(12, 2)
-  currency       String        @default("NGN")
+  amount         Decimal        @db.Decimal(12, 2)
+  currency       String         @default("NGN")
   method         PaymentMethod
-  status         PaymentStatus @default(PENDING)
+  purpose        PaymentPurpose @default(ORDER)
+  status         PaymentStatus  @default(PENDING)
   provider       String?
-  providerRef    String?       @unique
-  idempotencyKey String?       @unique
+  providerRef    String?        @unique
+  idempotencyKey String?        @unique
   paidAt         DateTime?
   refundedAt     DateTime?
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   order        Order?        @relation(fields: [orderId], references: [id], onDelete: SetNull)
@@ -1335,4 +1383,55 @@ model OtpCode {
 
   @@index([userId, purpose, createdAt])
   @@index([expiresAt])
+}
+
+model Wallet {
+  id             String   @id @default(uuid())
+  organizationId String   @unique
+  balance        Decimal  @default(0) @db.Decimal(12, 2)
+  currency       String   @default("NGN")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+}
+
+model WalletTransaction {
+  id           String       @id @default(uuid())
+  walletId     String
+  type         WalletTxType
+  amount       Decimal      @db.Decimal(12, 2) // negative for charges
+  balanceAfter Decimal      @db.Decimal(12, 2)
+  description  String
+  reference    String?      @unique
+  createdAt    DateTime     @default(now())
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId, createdAt])
+}
+
+model SmsCampaign {
+  id             String            @id @default(uuid())
+  organizationId String
+  senderId       String
+  body           String
+  recipientCount Int
+  segments       Int
+  unitPrice      Decimal           @db.Decimal(12, 2)
+  cost           Decimal           @db.Decimal(12, 2)
+  sentCount      Int               @default(0)
+  failedCount    Int               @default(0)
+  refunded       Decimal           @default(0) @db.Decimal(12, 2)
+  status         SmsCampaignStatus @default(SENDING)
+  idempotencyKey String?
+  createdAt      DateTime          @default(now())
+  completedAt    DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sender       User         @relation(fields: [senderId], references: [id])
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, createdAt])
 }
