@@ -1,3 +1,4 @@
+
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
@@ -17,17 +18,23 @@ import { PermissionsModule } from './common/permissions/permissions.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentsModule } from './payments/payments.module';
 import { OrgHoursModule } from './org-hours/org-hours.module';
-import {NoticesModule} from './notice/notices.module';
+import { NoticesModule } from './notice/notices.module';
 import { SosModule } from './sos/sos.module';
-import {NotificationsModule} from './notifications/notifications.module';
+import { NotificationsModule } from './notifications/notifications.module';
+
+// New modules
+import { WalletModule } from './wallet/wallet.module';
+import { SmsCampaignsModule } from './sms-campaigns/sms-campaigns.module';
+import { OtpModule } from './otp/otp.module';
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
 
-    // Enable background cron jobs (e.g., unpaid order expiration)
+    // Enable background cron jobs
     ScheduleModule.forRoot(),
 
-    // Rate limit: 100 requests per 60 seconds by default.
+    // Rate limit: 100 requests per 60 seconds by default
     ThrottlerModule.forRoot([
       {
         ttl: 60_000,
@@ -51,6 +58,11 @@ import {NotificationsModule} from './notifications/notifications.module';
     NoticesModule,
     SosModule,
     NotificationsModule,
+
+    // Register new modules
+    WalletModule,
+    SmsCampaignsModule,
+    OtpModule,
   ],
   providers: [
     {
