@@ -11,7 +11,7 @@ import { OtpChannel, OtpPurpose } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
-import { SmsService } from '../sms1/sms.service';
+import { SmsService } from '../sms/sms.service';
 import { OtpService } from '../otp/otp.service';
 
 const INVALID_CODE = 'Invalid or expired code.';

@@ -14,7 +14,7 @@ import { createHash, randomInt, randomUUID, timingSafeEqual } from 'crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
-import { SmsService } from '../sms1/sms.service';
+import { SmsService } from '../sms/sms.service';
 import { normalizePhone, tryNormalizePhone } from '../common/utils/phone';
 import { LoginDto, RegisterDto } from './dto';
 import { ChangePasswordDto, ResetPasswordDto } from './dto/password.dto';

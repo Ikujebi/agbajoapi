@@ -6,7 +6,7 @@ import { OrganizationsModule } from '../organizations/organizations.module';
 import { PermissionsModule } from '../common/permissions/permissions.module';
 // Adjust these module paths/names to the actual modules that export the services.
 import { MailModule } from '../mail/mail.module';
-import { SmsModule } from '../sms1/sms.module';
+import { SmsModule } from '../sms/sms.module';
 import { CloudinaryModule } from '../cloudinary/cloudinary.module';
 
 @Module({

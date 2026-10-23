@@ -10,7 +10,7 @@ import { PermissionsService } from '../common/permissions/permissions.service';
 import { Permission } from '../common/permissions/permissions';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 import { MailService } from '../mail/mail.service';
-import { SmsService } from '../sms1/sms.service';
+import { SmsService } from '../sms/sms.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import {
   CreateEventDto, CreateEventInvitationDto, UpdateEventDto,

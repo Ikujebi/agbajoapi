@@ -11,7 +11,7 @@ import { MembershipRole, Prisma, SmsCampaign } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { PermissionsService } from '../common/permissions/permissions.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
-import { SmsService } from '../sms1/sms.service';
+import { SmsService } from '../sms/sms.service';
 import { WalletService } from '../wallet/wallet.service';
 import { SmsBroadcastDto } from './dto/sms-broadcast.dto';
 
