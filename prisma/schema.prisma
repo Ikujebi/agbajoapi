@@ -337,7 +337,9 @@ enum AuditAction {
 
 model User {
   id                        String               @id @default(uuid())
-  fullName                  String
+  firstName                 String
+  lastName                  String
+  otherNames                String?
   email                     String?              @unique
   phone                     String               @unique
   passwordHash              String

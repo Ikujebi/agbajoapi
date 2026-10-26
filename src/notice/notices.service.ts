@@ -3,14 +3,14 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-} from '@nestjs/common';
-import { NoticeStatus } from '@prisma/client';
+} from "@nestjs/common";
+import { NoticeStatus } from "@prisma/client";
 
-import { PrismaService } from '../prisma/prisma.service';
-import { PermissionsService } from '../common/permissions/permissions.service';
-import { AuthUser } from '../common/decorators/current-user.decorator';
-import { CreateNoticeDto, UpdateNoticeDto } from './dto/notice.dto';
-import { NotificationsService } from '../notifications/notifications.service';
+import { PrismaService } from "../prisma/prisma.service";
+import { PermissionsService } from "../common/permissions/permissions.service";
+import { AuthUser } from "../common/decorators/current-user.decorator";
+import { CreateNoticeDto, UpdateNoticeDto } from "./dto/notice.dto";
+import { NotificationsService } from "../notifications/notifications.service";
 
 @Injectable()
 export class NoticesService {
@@ -26,52 +26,52 @@ export class NoticesService {
     const date = new Date(value);
 
     if (date <= new Date()) {
-      throw new BadRequestException('expiresAt must be in the future.');
+      throw new BadRequestException("expiresAt must be in the future.");
     }
 
     return date;
   }
 
   /** Tell every approved member (except the author) about a new notice. */
-private async notifyMembers(
-  organizationId: string,
-  authorId: string,
-  noticeId: string,
-  title: string,
-) {
-  const organization = await this.prisma.organization.findUnique({
-    where: { id: organizationId },
-    select: { name: true },
-  });
+  private async notifyMembers(
+    organizationId: string,
+    authorId: string,
+    noticeId: string,
+    title: string,
+  ) {
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { name: true },
+    });
 
-  const members = await this.prisma.membership.findMany({
-    where: {
-      organizationId,
-      status: 'APPROVED',
-      userId: { not: authorId },
-    },
-    select: { userId: true },
-  });
+    const members = await this.prisma.membership.findMany({
+      where: {
+        organizationId,
+        status: "APPROVED",
+        userId: { not: authorId },
+      },
+      select: { userId: true },
+    });
 
-  if (members.length === 0) return;
+    if (members.length === 0) return;
 
-  await this.notifications.send(
-    members.map((m) => m.userId),
-    {
-      title: `${organization?.name ?? 'Notice'}: ${title}`,
-      body: 'A new notice has been posted.',
-      data: { noticeId, organizationId },
-    },
-  );
-}
+    await this.notifications.send(
+      members.map((m) => m.userId),
+      {
+        title: `${organization?.name ?? "Notice"}: ${title}`,
+        body: "A new notice has been posted.",
+        data: { noticeId, organizationId },
+      },
+    );
+  }
 
   async create(user: AuthUser, organizationId: string, dto: CreateNoticeDto) {
-    await this.permissions.assert(user, organizationId, 'notice.manage');
+    await this.permissions.assert(user, organizationId, "notice.manage");
 
     const status = dto.status ?? NoticeStatus.PUBLISHED;
 
     if (status === NoticeStatus.ARCHIVED) {
-      throw new BadRequestException('A new notice cannot start archived.');
+      throw new BadRequestException("A new notice cannot start archived.");
     }
 
     const notice = await this.prisma.notice.create({
@@ -87,7 +87,12 @@ private async notifyMembers(
     });
 
     if (status === NoticeStatus.PUBLISHED) {
-      await this.notifyMembers(organizationId, user.id, notice.id, notice.title);
+      await this.notifyMembers(
+        organizationId,
+        user.id,
+        notice.id,
+        notice.title,
+      );
     }
 
     return notice;
@@ -101,7 +106,7 @@ private async notifyMembers(
     const canManage = await this.permissions.can(
       user,
       organizationId,
-      'notice.manage',
+      "notice.manage",
     );
 
     if (!canManage) {
@@ -112,10 +117,8 @@ private async notifyMembers(
         select: { status: true },
       });
 
-      if (!user.isSuperAdmin && membership?.status !== 'APPROVED') {
-        throw new ForbiddenException(
-          'Only approved members can view notices.',
-        );
+      if (!user.isSuperAdmin && membership?.status !== "APPROVED") {
+        throw new ForbiddenException("Only approved members can view notices.");
       }
     }
 
@@ -129,8 +132,17 @@ private async notifyMembers(
             status: NoticeStatus.PUBLISHED,
             OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
           },
-      include: { author: { select: { id: true, fullName: true } } },
-      orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
+      include: {
+        author: {
+          select: {
+            id: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
+          },
+        },
+      },
+      orderBy: [{ publishedAt: "desc" }, { createdAt: "desc" }],
       take: 50,
     });
   }
@@ -139,10 +151,10 @@ private async notifyMembers(
     const notice = await this.prisma.notice.findUnique({ where: { id } });
 
     if (!notice) {
-      throw new NotFoundException('Notice not found.');
+      throw new NotFoundException("Notice not found.");
     }
 
-    await this.permissions.assert(user, notice.organizationId, 'notice.manage');
+    await this.permissions.assert(user, notice.organizationId, "notice.manage");
 
     const publishing =
       dto.status === NoticeStatus.PUBLISHED &&
@@ -178,10 +190,10 @@ private async notifyMembers(
     const notice = await this.prisma.notice.findUnique({ where: { id } });
 
     if (!notice) {
-      throw new NotFoundException('Notice not found.');
+      throw new NotFoundException("Notice not found.");
     }
 
-    await this.permissions.assert(user, notice.organizationId, 'notice.manage');
+    await this.permissions.assert(user, notice.organizationId, "notice.manage");
 
     return this.prisma.notice.update({
       where: { id },

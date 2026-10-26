@@ -1,4 +1,3 @@
-
 import {
   IsEmail,
   IsOptional,
@@ -12,7 +11,17 @@ export class RegisterDto {
   @IsString()
   @MinLength(2)
   @MaxLength(100)
-  fullName!: string;
+  firstName!: string;
+
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  lastName!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(150)
+  otherNames?: string;
 
   @IsString()
   @Matches(/^\+?[0-9\s()-]{7,20}$/, {

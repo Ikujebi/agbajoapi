@@ -29,14 +29,15 @@ import {
   UpdateOrderStatusDto,
 } from './dto';
 import { NotificationsService } from '../notifications/notifications.service';
+
 type Tx = Prisma.TransactionClient;
 
 /**
  * Stock invariant:
- *  - creating an order RESERVES stock (product.reservedQty += qty)
- *  - PENDING -> CONFIRMED COMMITS it (quantity -= qty, reservedQty -= qty, SALE movement)
- *  - PENDING -> CANCELLED releases the reservation
- *  - CONFIRMED.. -> CANCELLED puts stock back (RETURN movement)
+ * - Creating an order reserves stock (reservedQty += quantity).
+ * - PENDING -> CONFIRMED commits stock (quantity -= quantity, reservedQty -= quantity).
+ * - PENDING -> CANCELLED releases the reservation.
+ * - CONFIRMED or later -> CANCELLED returns stock.
  */
 const NEXT: Record<OrderStatus, OrderStatus[]> = {
   PENDING: ['CONFIRMED', 'CANCELLED'],
@@ -74,18 +75,26 @@ export class OrdersService {
   ) {}
 
   // ---------- helpers ----------
+
   private async hasRole(
     userId: string,
     organizationId: string,
     roles: MembershipRole[],
   ) {
-    const m = await this.prisma.membership.findUnique({
-      where: { userId_organizationId: { userId, organizationId } },
+    const membership = await this.prisma.membership.findUnique({
+      where: {
+        userId_organizationId: { userId, organizationId },
+      },
     });
-    return !!m && m.status === 'APPROVED' && roles.includes(m.role);
+
+    return (
+      !!membership &&
+      membership.status === 'APPROVED' &&
+      roles.includes(membership.role)
+    );
   }
 
-  /** Everyone at the shop who handles orders (owner, manager, attendants). */
+  /** Everyone at the shop who handles orders. */
   private async staffIds(organizationId: string) {
     const rows = await this.prisma.membership.findMany({
       where: {
@@ -95,44 +104,66 @@ export class OrdersService {
       },
       select: { userId: true },
     });
-    return rows.map((r) => r.userId);
+
+    return rows.map((row) => row.userId);
   }
 
- private async notify(
-  userIds: string[],
-  type: NotificationType,
-  title: string,
-  body: string,
-  data?: Record<string, string | number | null>,
-) {
-  await this.notifications.send(userIds, { type, title, body, data });
-}
+  private async notify(
+    userIds: string[],
+    type: NotificationType,
+    title: string,
+    body: string,
+    data?: Record<string, string | number | null>,
+  ) {
+    if (userIds.length === 0) return;
+
+    await this.notifications.send(userIds, {
+      type,
+      title,
+      body,
+      data,
+    });
+  }
 
   private newOrderNumber() {
-    const d = new Date().toISOString().slice(2, 10).replace(/-/g, '');
-    return `NB-${d}-${randomBytes(3).toString('hex').toUpperCase()}`;
+    const date = new Date().toISOString().slice(2, 10).replace(/-/g, '');
+    return `NB-${date}-${randomBytes(3).toString('hex').toUpperCase()}`;
+  }
+
+  /** Builds a display name from the separate user name fields. */
+  private formatUserName(user: {
+    firstName: string;
+    otherNames: string | null;
+    lastName: string;
+  }) {
+    return [user.firstName, user.otherNames, user.lastName]
+      .filter((name) => name?.trim())
+      .join(' ');
   }
 
   // ---------- stock ----------
+
   private async commitStock(tx: Tx, orderId: string, actorId?: string) {
     const items = await tx.orderItem.findMany({
       where: { orderId, productId: { not: null } },
       orderBy: { productId: 'asc' },
     });
-    for (const it of items) {
-      const p = await tx.product.update({
-        where: { id: it.productId! },
+
+    for (const item of items) {
+      const product = await tx.product.update({
+        where: { id: item.productId! },
         data: {
-          quantity: { decrement: it.quantity },
-          reservedQty: { decrement: it.quantity },
+          quantity: { decrement: item.quantity },
+          reservedQty: { decrement: item.quantity },
         },
       });
+
       await tx.stockMovement.create({
         data: {
-          productId: p.id,
+          productId: product.id,
           type: 'SALE',
-          delta: -it.quantity,
-          quantityAfter: p.quantity,
+          delta: -item.quantity,
+          quantityAfter: product.quantity,
           reason: 'Order confirmed',
           reference: orderId,
           createdById: actorId,
@@ -146,10 +177,13 @@ export class OrdersService {
       where: { orderId, productId: { not: null } },
       orderBy: { productId: 'asc' },
     });
-    for (const it of items) {
+
+    for (const item of items) {
       await tx.product.update({
-        where: { id: it.productId! },
-        data: { reservedQty: { decrement: it.quantity } },
+        where: { id: item.productId! },
+        data: {
+          reservedQty: { decrement: item.quantity },
+        },
       });
     }
   }
@@ -159,17 +193,21 @@ export class OrdersService {
       where: { orderId, productId: { not: null } },
       orderBy: { productId: 'asc' },
     });
-    for (const it of items) {
-      const p = await tx.product.update({
-        where: { id: it.productId! },
-        data: { quantity: { increment: it.quantity } },
+
+    for (const item of items) {
+      const product = await tx.product.update({
+        where: { id: item.productId! },
+        data: {
+          quantity: { increment: item.quantity },
+        },
       });
+
       await tx.stockMovement.create({
         data: {
-          productId: p.id,
+          productId: product.id,
           type: 'RETURN',
-          delta: it.quantity,
-          quantityAfter: p.quantity,
+          delta: item.quantity,
+          quantityAfter: product.quantity,
           reason: 'Order cancelled',
           reference: orderId,
           createdById: actorId,
@@ -178,17 +216,27 @@ export class OrdersService {
     }
   }
 
-  /** Called by PaymentsService inside its transaction once online payment succeeds. */
+  /** Called by PaymentsService inside its transaction after online payment succeeds. */
   async confirmOrderTx(tx: Tx, orderId: string) {
-    const order = await tx.order.findUnique({ where: { id: orderId } });
-    if (!order) return { confirmed: false, reason: 'missing' as const };
-    if (order.status !== 'PENDING')
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+    });
+
+    if (!order) {
+      return { confirmed: false, reason: 'missing' as const };
+    }
+
+    if (order.status !== 'PENDING') {
       return { confirmed: false, reason: order.status };
+    }
+
     await this.commitStock(tx, orderId);
+
     await tx.order.update({
       where: { id: orderId },
       data: { status: 'CONFIRMED' },
     });
+
     return { confirmed: true as const };
   }
 
@@ -196,7 +244,9 @@ export class OrdersService {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
     });
+
     if (!order) return;
+
     if (lateReason) {
       await this.notify(
         [order.customerId],
@@ -205,6 +255,7 @@ export class OrdersService {
         `We received your payment for order ${order.orderNumber}, but the order was already ${lateReason.toLowerCase()}. It will be refunded.`,
         { orderId },
       );
+
       await this.notify(
         await this.staffIds(order.organizationId),
         'PAYMENT',
@@ -212,8 +263,10 @@ export class OrdersService {
         `Payment arrived for ${order.orderNumber} after it was ${lateReason.toLowerCase()}. Please refund the customer.`,
         { orderId },
       );
+
       return;
     }
+
     await this.notify(
       [order.customerId],
       'PAYMENT',
@@ -221,6 +274,7 @@ export class OrdersService {
       `Order ${order.orderNumber} is paid and confirmed.`,
       { orderId },
     );
+
     await this.notify(
       await this.staffIds(order.organizationId),
       'ORDER',
@@ -231,14 +285,20 @@ export class OrdersService {
   }
 
   // ---------- create ----------
+
   async create(userId: string, dto: CreateOrderDto) {
     const org = await this.orgs.getOrThrow(dto.organizationId);
-    if (org.type !== 'SHOP' || !org.isActive)
+
+    if (org.type !== 'SHOP' || !org.isActive) {
       throw new BadRequestException('This shop is not accepting orders');
-    if (!org.acceptingOrders)
+    }
+
+    if (!org.acceptingOrders) {
       throw new BadRequestException(
         'This shop has paused orders. Please try again later.',
       );
+    }
+
     await this.hours.assertOpen(
       org.id,
       'OPENING',
@@ -247,53 +307,85 @@ export class OrdersService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: userId },
+      select: {
+        id: true,
+        firstName: true,
+        otherNames: true,
+        lastName: true,
+        phone: true,
+      },
     });
 
-    const qtyById = new Map<string, number>();
-    for (const it of dto.items)
-      qtyById.set(it.productId, (qtyById.get(it.productId) ?? 0) + it.quantity);
+    const quantityByProductId = new Map<string, number>();
+
+    for (const item of dto.items) {
+      quantityByProductId.set(
+        item.productId,
+        (quantityByProductId.get(item.productId) ?? 0) + item.quantity,
+      );
+    }
 
     const products = await this.prisma.product.findMany({
       where: {
-        id: { in: [...qtyById.keys()] },
+        id: { in: [...quantityByProductId.keys()] },
         organizationId: org.id,
         status: 'ACTIVE',
         isAvailable: true,
       },
     });
-    if (products.length !== qtyById.size)
+
+    if (products.length !== quantityByProductId.size) {
       throw new BadRequestException('One or more products are unavailable');
+    }
 
     const delivery = !!dto.deliveryAddress?.trim();
+
     const deliveryFee = new Prisma.Decimal(
       delivery ? Number(this.config.get('DELIVERY_FEE')) || 0 : 0,
     );
 
-    // Reserve in a stable order so two orders touching the same products
-    // can never deadlock each other.
+    // Reserve stock in stable product-ID order.
     const lines = products
-      .map((p) => {
-        const quantity = qtyById.get(p.id)!;
-        return { p, quantity, lineTotal: p.price.mul(quantity) };
+      .map((product) => {
+        const quantity = quantityByProductId.get(product.id)!;
+
+        return {
+          product,
+          quantity,
+          lineTotal: product.price.mul(quantity),
+        };
       })
-      .sort((a, b) => (a.p.id < b.p.id ? -1 : 1));
+      .sort((a, b) => (a.product.id < b.product.id ? -1 : 1));
 
     const subtotal = lines.reduce(
-      (s, l) => s.add(l.lineTotal),
+      (sum, line) => sum.add(line.lineTotal),
       new Prisma.Decimal(0),
     );
+
     const total = subtotal.add(deliveryFee);
-    const customerName = dto.customerName?.trim() || user.fullName;
+
+    const customerName =
+      dto.customerName?.trim() || this.formatUserName(user);
+
     const customerPhone = dto.customerPhone?.trim() || user.phone;
 
     const order = await this.prisma.$transaction(async (tx) => {
-      for (const l of lines) {
-        // atomic check-and-reserve; fails if someone else grabbed the stock
-        const n = await tx.$executeRaw`UPDATE "Product" SET "reservedQty" = "reservedQty" + ${l.quantity}::int
-          WHERE "id" = ${l.p.id} AND "quantity" - "reservedQty" >= ${l.quantity}::int`;
-        if (n === 0)
-          throw new BadRequestException(`Not enough stock for ${l.p.name}`);
+      for (const line of lines) {
+        // Atomic check-and-reserve prevents overselling.
+        const affectedRows = await tx.$executeRaw`
+          UPDATE "Product"
+          SET "reservedQty" = "reservedQty" + ${line.quantity}::int
+          WHERE "id" = ${line.product.id}
+            AND "quantity" - "reservedQty" >= ${line.quantity}::int
+        `;
+
+        if (affectedRows === 0) {
+          throw new BadRequestException(
+            `Not enough stock for ${line.product.name}`,
+          );
+        }
       }
+
       return tx.order.create({
         data: {
           orderNumber: this.newOrderNumber(),
@@ -307,13 +399,13 @@ export class OrdersService {
           deliveryAddress: delivery ? dto.deliveryAddress!.trim() : null,
           deliveryNotes: dto.deliveryNotes,
           items: {
-            create: lines.map((l) => ({
-              productId: l.p.id,
-              productName: l.p.name,
-              sku: l.p.sku,
-              quantity: l.quantity,
-              unitPrice: l.p.price,
-              lineTotal: l.lineTotal,
+            create: lines.map((line) => ({
+              productId: line.product.id,
+              productName: line.product.name,
+              sku: line.product.sku,
+              quantity: line.quantity,
+              unitPrice: line.product.price,
+              lineTotal: line.lineTotal,
             })),
           },
           ...(dto.payCash && {
@@ -340,7 +432,11 @@ export class OrdersService {
             },
           }),
         },
-        include: { items: true, payments: true, delivery: true },
+        include: {
+          items: true,
+          payments: true,
+          delivery: true,
+        },
       });
     });
 
@@ -348,22 +444,42 @@ export class OrdersService {
       await this.staffIds(org.id),
       'ORDER',
       'New order',
-      `${order.orderNumber} · ₦${total.toFixed(2)} · ${dto.payCash ? 'pay on ' + (delivery ? 'delivery' : 'pickup') : 'awaiting online payment'}`,
+      `${order.orderNumber} · ₦${total.toFixed(2)} · ${
+        dto.payCash
+          ? `pay on ${delivery ? 'delivery' : 'pickup'}`
+          : 'awaiting online payment'
+      }`,
       { orderId: order.id },
     );
+
     return order;
   }
 
   // ---------- read ----------
+
   private readonly include = {
     items: true,
     payments: true,
     delivery: {
       include: {
-        assignedAgent: { select: { id: true, fullName: true, phone: true } },
+        assignedAgent: {
+          select: {
+            id: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
+            phone: true,
+          },
+        },
       },
     },
-    organization: { select: { id: true, name: true, phone: true } },
+    organization: {
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+      },
+    },
   } satisfies Prisma.OrderInclude;
 
   mine(userId: string) {
@@ -381,8 +497,12 @@ export class OrdersService {
     status?: OrderStatus,
   ) {
     await this.permissions.assert(user, organizationId, 'order.view');
+
     return this.prisma.order.findMany({
-      where: { organizationId, ...(status && { status }) },
+      where: {
+        organizationId,
+        ...(status && { status }),
+      },
       include: this.include,
       orderBy: { placedAt: 'desc' },
       take: 200,
@@ -394,7 +514,10 @@ export class OrdersService {
       where: { id },
       include: this.include,
     });
-    if (!order) throw new NotFoundException('Order not found');
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
 
     const isCustomer = order.customerId === user.id;
     const isAssignedRider = order.delivery?.assignedAgent?.id === user.id;
@@ -406,10 +529,12 @@ export class OrdersService {
     ) {
       throw new ForbiddenException();
     }
+
     return order;
   }
 
   // ---------- status changes ----------
+
   private async applyStatus(
     order: { id: string; status: OrderStatus },
     to: OrderStatus,
@@ -417,45 +542,69 @@ export class OrdersService {
   ) {
     await this.prisma.$transaction(async (tx) => {
       const claimed = await tx.order.updateMany({
-        where: { id: order.id, status: order.status },
+        where: {
+          id: order.id,
+          status: order.status,
+        },
         data: {
           status: to,
           ...(to === 'CANCELLED' && { cancelledAt: new Date() }),
         },
       });
-      if (claimed.count === 0)
+
+      if (claimed.count === 0) {
         throw new ConflictException(
           'This order was just updated by someone else. Refresh and retry.',
         );
+      }
 
-      if (order.status === 'PENDING' && to === 'CONFIRMED')
+      if (order.status === 'PENDING' && to === 'CONFIRMED') {
         await this.commitStock(tx, order.id, actorId);
+      }
 
       if (to === 'CANCELLED') {
-        if (order.status === 'PENDING')
+        if (order.status === 'PENDING') {
           await this.releaseReservation(tx, order.id);
-        else await this.returnStock(tx, order.id, actorId);
+        } else {
+          await this.returnStock(tx, order.id, actorId);
+        }
+
         await tx.delivery.updateMany({
           where: { orderId: order.id },
           data: { status: 'CANCELLED' },
         });
+
         await tx.payment.updateMany({
-          where: { orderId: order.id, status: 'PENDING' },
+          where: {
+            orderId: order.id,
+            status: 'PENDING',
+          },
           data: { status: 'FAILED' },
         });
       }
 
       if (to === 'DELIVERED') {
         await tx.payment.updateMany({
-          where: { orderId: order.id, method: 'CASH', status: 'PENDING' },
-          data: { status: 'SUCCEEDED', paidAt: new Date() },
+          where: {
+            orderId: order.id,
+            method: 'CASH',
+            status: 'PENDING',
+          },
+          data: {
+            status: 'SUCCEEDED',
+            paidAt: new Date(),
+          },
         });
+
         await tx.delivery.updateMany({
           where: {
             orderId: order.id,
             status: { notIn: ['DELIVERED', 'CANCELLED'] },
           },
-          data: { status: 'DELIVERED', deliveredAt: new Date() },
+          data: {
+            status: 'DELIVERED',
+            deliveredAt: new Date(),
+          },
         });
       }
     });
@@ -467,43 +616,66 @@ export class OrdersService {
     dto: UpdateOrderStatusDto,
   ) {
     const { status: to } = dto;
+
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      include: { payments: true, delivery: true },
+      include: {
+        payments: true,
+        delivery: true,
+      },
     });
-    if (!order) throw new NotFoundException('Order not found');
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
 
     const staff = await this.permissions.can(
       user,
       order.organizationId,
       'order.manage',
     );
+
     const isCustomer = order.customerId === user.id;
+
     if (
       !staff &&
       !(isCustomer && to === 'CANCELLED' && order.status === 'PENDING')
     ) {
       throw new ForbiddenException('You cannot make this change');
     }
-    if (!NEXT[order.status].includes(to))
+
+    if (!NEXT[order.status].includes(to)) {
       throw new BadRequestException(
         `Cannot move an order from ${order.status} to ${to}`,
       );
-    if (to === 'CONFIRMED' && !order.payments.some((p) => p.method === 'CASH')) {
+    }
+
+    if (
+      to === 'CONFIRMED' &&
+      !order.payments.some((payment) => payment.method === 'CASH')
+    ) {
       throw new BadRequestException(
         'Online orders are confirmed automatically once paid',
       );
     }
-    if (to === 'OUT_FOR_DELIVERY' && !order.delivery)
+
+    if (to === 'OUT_FOR_DELIVERY' && !order.delivery) {
       throw new BadRequestException('This order has no delivery address');
-    if (to === 'READY_FOR_PICKUP' && order.delivery)
+    }
+
+    if (to === 'READY_FOR_PICKUP' && order.delivery) {
       throw new BadRequestException('This is a delivery order');
+    }
 
     await this.applyStatus(order, to, user.id);
 
     const refundRequired =
       to === 'CANCELLED' &&
-      order.payments.some((p) => p.status === 'SUCCEEDED' && p.method !== 'CASH');
+      order.payments.some(
+        (payment) =>
+          payment.status === 'SUCCEEDED' && payment.method !== 'CASH',
+      );
+
     if (isCustomer && !staff) {
       await this.notify(
         await this.staffIds(order.organizationId),
@@ -517,32 +689,54 @@ export class OrdersService {
         [order.customerId],
         'ORDER',
         'Order update',
-        `Your order ${order.orderNumber} ${CUSTOMER_TEXT[to] ?? to.toLowerCase()}.${refundRequired ? ' Your refund will be processed by the shop.' : ''}`,
+        `Your order ${order.orderNumber} ${
+          CUSTOMER_TEXT[to] ?? to.toLowerCase()
+        }.${refundRequired ? ' Your refund will be processed by the shop.' : ''}`,
         { orderId },
       );
     }
-    return { id: order.id, status: to, refundRequired };
+
+    return {
+      id: order.id,
+      status: to,
+      refundRequired,
+    };
   }
 
   // ---------- delivery ----------
+
   async assignAgent(user: AuthUser, orderId: string, dto: AssignAgentDto) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: { delivery: true },
     });
-    if (!order) throw new NotFoundException('Order not found');
-    await this.permissions.assert(user, order.organizationId, 'order.manage');
-    if (!order.delivery)
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    await this.permissions.assert(
+      user,
+      order.organizationId,
+      'order.manage',
+    );
+
+    if (!order.delivery) {
       throw new BadRequestException('This order has no delivery');
-    if (['DELIVERED', 'CANCELLED'].includes(order.delivery.status))
+    }
+
+    if (['DELIVERED', 'CANCELLED'].includes(order.delivery.status)) {
       throw new BadRequestException('Delivery already closed');
+    }
 
     const agentRoles = rolesWith('SHOP', 'delivery.perform');
+
     if (!(await this.hasRole(dto.agentId, order.organizationId, agentRoles))) {
       throw new BadRequestException(
         'Agent must be an approved rider or staff member of this shop',
       );
     }
+
     const updated = await this.prisma.delivery.update({
       where: { id: order.delivery.id },
       data: {
@@ -551,6 +745,7 @@ export class OrdersService {
         assignedAt: new Date(),
       },
     });
+
     await this.notify(
       [dto.agentId],
       'DELIVERY',
@@ -558,6 +753,7 @@ export class OrdersService {
       `Deliver order ${order.orderNumber} to ${order.delivery.deliveryAddress}.`,
       { orderId },
     );
+
     await this.notify(
       [order.customerId],
       'DELIVERY',
@@ -565,6 +761,7 @@ export class OrdersService {
       `A rider has been assigned to order ${order.orderNumber}.`,
       { orderId },
     );
+
     return updated;
   }
 
@@ -573,36 +770,61 @@ export class OrdersService {
     deliveryId: string,
     dto: UpdateDeliveryDto,
   ) {
-    const d = await this.prisma.delivery.findUnique({
+    const delivery = await this.prisma.delivery.findUnique({
       where: { id: deliveryId },
       include: { order: true },
     });
-    if (!d) throw new NotFoundException('Delivery not found');
+
+    if (!delivery) {
+      throw new NotFoundException('Delivery not found');
+    }
 
     const staff = await this.permissions.can(
       user,
-      d.organizationId,
+      delivery.organizationId,
       'order.manage',
     );
-    if (!staff && d.assignedAgentId !== user.id) throw new ForbiddenException();
+
+    if (!staff && delivery.assignedAgentId !== user.id) {
+      throw new ForbiddenException();
+    }
+
     if (
       !['PICKED_UP', 'IN_TRANSIT', 'DELIVERED', 'FAILED'].includes(dto.status)
-    )
+    ) {
       throw new BadRequestException('Invalid status');
-    if (['DELIVERED', 'CANCELLED'].includes(d.status))
-      throw new BadRequestException('Delivery already closed');
+    }
 
-    let cur = d.order;
+    if (['DELIVERED', 'CANCELLED'].includes(delivery.status)) {
+      throw new BadRequestException('Delivery already closed');
+    }
+
+    let currentOrder = delivery.order;
+
     if (dto.status === 'PICKED_UP' || dto.status === 'DELIVERED') {
-      if (cur.status === 'PROCESSING') {
-        await this.applyStatus(cur, 'OUT_FOR_DELIVERY', user.id);
-        cur = { ...cur, status: 'OUT_FOR_DELIVERY' };
+      if (currentOrder.status === 'PROCESSING') {
+        await this.applyStatus(
+          currentOrder,
+          'OUT_FOR_DELIVERY',
+          user.id,
+        );
+
+        currentOrder = {
+          ...currentOrder,
+          status: 'OUT_FOR_DELIVERY',
+        };
       }
     }
-    if (dto.status === 'DELIVERED' && cur.status === 'OUT_FOR_DELIVERY')
-      await this.applyStatus(cur, 'DELIVERED', user.id);
+
+    if (
+      dto.status === 'DELIVERED' &&
+      currentOrder.status === 'OUT_FOR_DELIVERY'
+    ) {
+      await this.applyStatus(currentOrder, 'DELIVERED', user.id);
+    }
 
     const now = new Date();
+
     const updated = await this.prisma.delivery.update({
       where: { id: deliveryId },
       data: {
@@ -617,67 +839,98 @@ export class OrdersService {
 
     if (dto.status === 'FAILED') {
       await this.notify(
-        await this.staffIds(d.organizationId),
+        await this.staffIds(delivery.organizationId),
         'DELIVERY',
         'Delivery failed',
-        `${d.order.orderNumber}: ${updated.failedReason}`,
-        { orderId: d.orderId },
+        `${delivery.order.orderNumber}: ${updated.failedReason}`,
+        { orderId: delivery.orderId },
       );
     }
+
     await this.notify(
-      [d.order.customerId],
+      [delivery.order.customerId],
       'DELIVERY',
       'Delivery update',
-      `Order ${d.order.orderNumber}: ${dto.status.replace('_', ' ').toLowerCase()}.`,
-      { orderId: d.orderId },
+      `Order ${delivery.order.orderNumber}: ${dto.status
+        .replace('_', ' ')
+        .toLowerCase()}.`,
+      { orderId: delivery.orderId },
     );
+
     return updated;
   }
 
   // ---------- housekeeping ----------
-  /** Frees reserved stock for online orders that were never paid. Needs ScheduleModule.forRoot(). */
+
+  /** Frees reserved stock for online orders that were never paid. */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async expireUnpaid() {
     const stale = await this.prisma.order.findMany({
       where: {
         status: 'PENDING',
-        placedAt: { lt: new Date(Date.now() - UNPAID_EXPIRY_MS) },
-        payments: { none: { method: 'CASH' } },
+        placedAt: {
+          lt: new Date(Date.now() - UNPAID_EXPIRY_MS),
+        },
+        payments: {
+          none: { method: 'CASH' },
+        },
       },
-      select: { id: true, customerId: true, orderNumber: true },
+      select: {
+        id: true,
+        customerId: true,
+        orderNumber: true,
+      },
       take: 100,
     });
-    for (const o of stale) {
+
+    for (const order of stale) {
       try {
         const done = await this.prisma.$transaction(async (tx) => {
-          const c = await tx.order.updateMany({
-            where: { id: o.id, status: 'PENDING' },
-            data: { status: 'CANCELLED', cancelledAt: new Date() },
+          const claimed = await tx.order.updateMany({
+            where: {
+              id: order.id,
+              status: 'PENDING',
+            },
+            data: {
+              status: 'CANCELLED',
+              cancelledAt: new Date(),
+            },
           });
-          if (!c.count) return false;
-          await this.releaseReservation(tx, o.id);
+
+          if (!claimed.count) return false;
+
+          await this.releaseReservation(tx, order.id);
+
           await tx.payment.updateMany({
-            where: { orderId: o.id, status: 'PENDING' },
+            where: {
+              orderId: order.id,
+              status: 'PENDING',
+            },
             data: { status: 'FAILED' },
           });
+
           await tx.delivery.updateMany({
-            where: { orderId: o.id },
+            where: { orderId: order.id },
             data: { status: 'CANCELLED' },
           });
+
           return true;
         });
-        if (done)
+
+        if (done) {
           await this.notify(
-            [o.customerId],
+            [order.customerId],
             'ORDER',
             'Order expired',
-            `Order ${o.orderNumber} was cancelled because it wasn't paid in time.`,
-            { orderId: o.id },
+            `Order ${order.orderNumber} was cancelled because it wasn't paid in time.`,
+            { orderId: order.id },
           );
-      } catch (e) {
-        this.log.error(`Failed to expire order ${o.id}: ${(e as Error).message}`);
+        }
+      } catch (error) {
+        this.log.error(
+          `Failed to expire order ${order.id}: ${(error as Error).message}`,
+        );
       }
     }
   }
-  
 }

@@ -174,7 +174,9 @@ export class VisitorsService {
         host: {
           select: {
             id: true,
-            fullName: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
             phone: true,
           },
         },
@@ -309,7 +311,12 @@ export class VisitorsService {
           select: {
             visitorName: true,
             host: {
-              select: { id: true, fullName: true },
+              select: {
+                id: true,
+                firstName: true,
+                otherNames: true,
+                lastName: true,
+              },
             },
           },
         },

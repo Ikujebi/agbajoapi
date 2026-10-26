@@ -4,14 +4,15 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-} from "@nestjs/common";
-import { SosStatus } from "@prisma/client";
-import { NotificationsService } from "../notifications/notifications.service";
-import { PrismaService } from "../prisma/prisma.service";
-import { PermissionsService } from "../common/permissions/permissions.service";
-import { rolesWith } from "../common/permissions/permissions";
-import { AuthUser } from "../common/decorators/current-user.decorator";
-import { TriggerSosDto } from "./dto/sos.dto";
+} from '@nestjs/common';
+import { SosStatus } from '@prisma/client';
+
+import { NotificationsService } from '../notifications/notifications.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { PermissionsService } from '../common/permissions/permissions.service';
+import { rolesWith } from '../common/permissions/permissions';
+import { AuthUser } from '../common/decorators/current-user.decorator';
+import { TriggerSosDto } from './dto/sos.dto';
 
 /** A user who already has an open alert this recent gets that alert back. */
 const DUPLICATE_WINDOW_MS = 2 * 60 * 1000;
@@ -34,8 +35,8 @@ export class SosService {
     const responders = await this.prisma.membership.findMany({
       where: {
         organizationId,
-        status: "APPROVED",
-        role: { in: rolesWith("ESTATE", "sos.respond") },
+        status: 'APPROVED',
+        role: { in: rolesWith('ESTATE', 'sos.respond') },
         userId: { not: excludeUserId },
       },
       select: { userId: true },
@@ -45,7 +46,7 @@ export class SosService {
 
     await this.notifications.send(
       responders.map((r) => r.userId),
-      { type: "SAFETY", title, body, data },
+      { type: 'SAFETY', title, body, data },
     );
   }
 
@@ -56,12 +57,12 @@ export class SosService {
     });
 
     if (!organization || !organization.isActive) {
-      throw new NotFoundException("Organization not found.");
+      throw new NotFoundException('Organization not found.');
     }
 
-    if (organization.type !== "ESTATE") {
+    if (organization.type !== 'ESTATE') {
       throw new BadRequestException(
-        "SOS alerts are only available in estates.",
+        'SOS alerts are only available in estates.',
       );
     }
 
@@ -72,27 +73,27 @@ export class SosService {
       select: { status: true },
     });
 
-    if (membership?.status !== "APPROVED") {
+    if (membership?.status !== 'APPROVED') {
       throw new ForbiddenException(
-        "Only approved estate members can send SOS.",
+        'Only approved estate members can send SOS.',
       );
     }
 
     if ((dto.latitude === undefined) !== (dto.longitude === undefined)) {
       throw new BadRequestException(
-        "Send both latitude and longitude, or neither.",
+        'Send both latitude and longitude, or neither.',
       );
     }
 
-    // Idempotent: repeated taps return the alert that is already open.
+    // Repeated taps return a recent open alert instead of creating duplicates.
     const recent = await this.prisma.sosAlert.findFirst({
       where: {
         organizationId,
         userId: user.id,
-        status: { in: ["OPEN", "ACKNOWLEDGED"] },
+        status: { in: ['OPEN', 'ACKNOWLEDGED'] },
         createdAt: { gt: new Date(Date.now() - DUPLICATE_WINDOW_MS) },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: { createdAt: 'desc' },
     });
 
     if (recent) return recent;
@@ -109,13 +110,24 @@ export class SosService {
 
     const sender = await this.prisma.user.findUnique({
       where: { id: user.id },
-      select: { fullName: true, phone: true },
+      select: {
+        firstName: true,
+        otherNames: true,
+        lastName: true,
+        phone: true,
+      },
     });
+
+    const senderName = sender
+      ? [sender.firstName, sender.otherNames, sender.lastName]
+          .filter((name) => name?.trim())
+          .join(' ')
+      : '';
 
     await this.notifyResponders(
       organizationId,
       user.id,
-      `SOS: ${sender?.fullName ?? "A resident"} needs help`,
+      `SOS: ${senderName || 'A resident'} needs help`,
       dto.message?.trim() || `Emergency alert in ${organization.name}.`,
       {
         alertId: alert.id,
@@ -130,14 +142,25 @@ export class SosService {
   }
 
   async list(user: AuthUser, organizationId: string, status?: SosStatus) {
-    await this.permissions.assert(user, organizationId, "sos.respond");
+    await this.permissions.assert(user, organizationId, 'sos.respond');
 
     return this.prisma.sosAlert.findMany({
-      where: { organizationId, ...(status ? { status } : {}) },
-      include: {
-        user: { select: { id: true, fullName: true, phone: true } },
+      where: {
+        organizationId,
+        ...(status ? { status } : {}),
       },
-      orderBy: { createdAt: "desc" },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
+            phone: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
       take: 100,
     });
   }
@@ -145,19 +168,21 @@ export class SosService {
   mine(userId: string) {
     return this.prisma.sosAlert.findMany({
       where: { userId },
-      orderBy: { createdAt: "desc" },
+      orderBy: { createdAt: 'desc' },
       take: 50,
     });
   }
 
   private async loadForResponder(user: AuthUser, id: string) {
-    const alert = await this.prisma.sosAlert.findUnique({ where: { id } });
+    const alert = await this.prisma.sosAlert.findUnique({
+      where: { id },
+    });
 
     if (!alert) {
-      throw new NotFoundException("SOS alert not found.");
+      throw new NotFoundException('SOS alert not found.');
     }
 
-    await this.permissions.assert(user, alert.organizationId, "sos.respond");
+    await this.permissions.assert(user, alert.organizationId, 'sos.respond');
 
     return alert;
   }
@@ -165,46 +190,59 @@ export class SosService {
   async acknowledge(user: AuthUser, id: string) {
     const alert = await this.loadForResponder(user, id);
 
-    // Claim by status so two responders cannot both acknowledge.
+    // Claim by status so two responders cannot both acknowledge the alert.
     const claimed = await this.prisma.sosAlert.updateMany({
-      where: { id, status: "OPEN" },
-      data: { status: "ACKNOWLEDGED", acknowledgedAt: new Date() },
+      where: { id, status: 'OPEN' },
+      data: {
+        status: 'ACKNOWLEDGED',
+        acknowledgedAt: new Date(),
+      },
     });
 
     if (claimed.count === 0) {
-      throw new ConflictException("This alert has already been handled.");
+      throw new ConflictException('This alert has already been handled.');
     }
 
     await this.notifications.send([alert.userId], {
-      type: "SAFETY",
-      title: "Help is on the way",
-      body: "Your SOS has been acknowledged by estate security.",
+      type: 'SAFETY',
+      title: 'Help is on the way',
+      body: 'Your SOS has been acknowledged by estate security.',
       data: { alertId: id },
     });
 
-    return this.prisma.sosAlert.findUniqueOrThrow({ where: { id } });
+    return this.prisma.sosAlert.findUniqueOrThrow({
+      where: { id },
+    });
   }
 
   async resolve(user: AuthUser, id: string) {
     const alert = await this.loadForResponder(user, id);
 
     const claimed = await this.prisma.sosAlert.updateMany({
-      where: { id, status: { in: ["OPEN", "ACKNOWLEDGED"] } },
-      data: { status: "RESOLVED", resolvedAt: new Date() },
+      where: {
+        id,
+        status: { in: ['OPEN', 'ACKNOWLEDGED'] },
+      },
+      data: {
+        status: 'RESOLVED',
+        resolvedAt: new Date(),
+      },
     });
 
     if (claimed.count === 0) {
-      throw new ConflictException("This alert is already closed.");
+      throw new ConflictException('This alert is already closed.');
     }
 
     await this.notifications.send([alert.userId], {
-      type: "SAFETY",
-      title: "SOS resolved",
-      body: "Your SOS alert was marked as resolved.",
+      type: 'SAFETY',
+      title: 'SOS resolved',
+      body: 'Your SOS alert was marked as resolved.',
       data: { alertId: id },
     });
 
-    return this.prisma.sosAlert.findUniqueOrThrow({ where: { id } });
+    return this.prisma.sosAlert.findUniqueOrThrow({
+      where: { id },
+    });
   }
 
   /** The person who raised the alert can cancel it, for example after a false alarm. */
@@ -214,26 +252,37 @@ export class SosService {
     });
 
     if (!alert) {
-      throw new NotFoundException("SOS alert not found.");
+      throw new NotFoundException('SOS alert not found.');
     }
 
     const claimed = await this.prisma.sosAlert.updateMany({
-      where: { id, status: { in: ["OPEN", "ACKNOWLEDGED"] } },
-      data: { status: "CANCELLED", resolvedAt: new Date() },
+      where: {
+        id,
+        status: { in: ['OPEN', 'ACKNOWLEDGED'] },
+      },
+      data: {
+        status: 'CANCELLED',
+        resolvedAt: new Date(),
+      },
     });
 
     if (claimed.count === 0) {
-      throw new ConflictException("This alert is already closed.");
+      throw new ConflictException('This alert is already closed.');
     }
 
     await this.notifyResponders(
       alert.organizationId,
       userId,
-      "SOS cancelled",
-      "The resident cancelled their alert.",
-      { alertId: id, organizationId: alert.organizationId },
+      'SOS cancelled',
+      'The resident cancelled their alert.',
+      {
+        alertId: id,
+        organizationId: alert.organizationId,
+      },
     );
 
-    return this.prisma.sosAlert.findUniqueOrThrow({ where: { id } });
+    return this.prisma.sosAlert.findUniqueOrThrow({
+      where: { id },
+    });
   }
 }

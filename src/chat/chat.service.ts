@@ -3,25 +3,25 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-} from '@nestjs/common';
+} from "@nestjs/common";
 import {
   ChatPrivacy,
   ConversationStatus,
   ConversationType,
   MembershipStatus,
   Prisma,
-} from '@prisma/client';
-import { PrismaService } from '../prisma/prisma.service';
-import { hasPermission } from '../common/permissions/permissions';
+} from "@prisma/client";
+import { PrismaService } from "../prisma/prisma.service";
+import { hasPermission } from "../common/permissions/permissions";
 
-export type ChatVerdict = 'ALLOWED' | 'REQUEST' | 'DENIED';
+export type ChatVerdict = "ALLOWED" | "REQUEST" | "DENIED";
 
 const MAX_MESSAGE_LENGTH = 5000;
 const MESSAGE_PAGE_SIZE = 50;
 const MAX_CONVERSATIONS = 100;
 
 type DirectConversation = Prisma.ConversationGetPayload<object> & {
-  type: 'DIRECT';
+  type: "DIRECT";
   userAId: string;
   userBId: string;
 };
@@ -43,12 +43,12 @@ export class ChatService {
     conversation: Prisma.ConversationGetPayload<object>,
   ): asserts conversation is DirectConversation {
     if (
-      conversation.type !== 'DIRECT' ||
+      conversation.type !== "DIRECT" ||
       !conversation.userAId ||
       !conversation.userBId
     ) {
       throw new BadRequestException(
-        'This operation only supports direct conversations',
+        "This operation only supports direct conversations",
       );
     }
   }
@@ -76,7 +76,7 @@ export class ChatService {
     });
 
     if (!user || !user.isActive) {
-      throw new NotFoundException('User not found');
+      throw new NotFoundException("User not found");
     }
   }
 
@@ -91,10 +91,7 @@ export class ChatService {
   /**
    * A block in either direction prevents communication.
    */
-  private async isBlocked(
-    userAId: string,
-    userBId: string,
-  ): Promise<boolean> {
+  private async isBlocked(userAId: string, userBId: string): Promise<boolean> {
     const block = await this.prisma.block.findFirst({
       where: {
         OR: [
@@ -137,7 +134,9 @@ export class ChatService {
     });
 
     const managed = adminMemberships
-      .filter((m) => hasPermission(m.organization.type, m.role, 'members.manage'))
+      .filter((m) =>
+        hasPermission(m.organization.type, m.role, "members.manage"),
+      )
       .map((m) => m.organizationId);
 
     if (managed.length === 0) return false;
@@ -188,18 +187,13 @@ export class ChatService {
    * Determines whether a sender may start a direct conversation.
    * Blocks take precedence over privacy exceptions.
    */
-  async canStart(
-    senderId: string,
-    recipientId: string,
-  ): Promise<ChatVerdict> {
+  async canStart(senderId: string, recipientId: string): Promise<ChatVerdict> {
     if (senderId === recipientId) {
-      throw new BadRequestException(
-        'You cannot message yourself',
-      );
+      throw new BadRequestException("You cannot message yourself");
     }
 
     if (await this.isBlocked(senderId, recipientId)) {
-      return 'DENIED';
+      return "DENIED";
     }
 
     const recipient = await this.prisma.user.findUnique({
@@ -212,48 +206,35 @@ export class ChatService {
     });
 
     if (!recipient || !recipient.isActive) {
-      throw new NotFoundException('User not found');
+      throw new NotFoundException("User not found");
     }
 
     // Preserve the existing organization admin/owner exception.
-    if (
-      await this.isAdminOfOrgWhereMember(
-        senderId,
-        recipientId,
-      )
-    ) {
-      return 'ALLOWED';
+    if (await this.isAdminOfOrgWhereMember(senderId, recipientId)) {
+      return "ALLOWED";
     }
 
-    if (
-      await this.isAdminOfOrgWhereMember(
-        recipientId,
-        senderId,
-      )
-    ) {
-      return 'ALLOWED';
+    if (await this.isAdminOfOrgWhereMember(recipientId, senderId)) {
+      return "ALLOWED";
     }
 
     switch (recipient.chatPrivacy) {
       case ChatPrivacy.EVERYONE:
-        return 'ALLOWED';
+        return "ALLOWED";
 
       case ChatPrivacy.MY_ORGS_ONLY:
-        return (await this.shareOrganization(
-          senderId,
-          recipientId,
-        ))
-          ? 'ALLOWED'
-          : 'DENIED';
+        return (await this.shareOrganization(senderId, recipientId))
+          ? "ALLOWED"
+          : "DENIED";
 
       case ChatPrivacy.REQUEST_ONLY:
-        return 'REQUEST';
+        return "REQUEST";
 
       case ChatPrivacy.ADMINS_ONLY:
-        return 'DENIED';
+        return "DENIED";
 
       default:
-        return 'DENIED';
+        return "DENIED";
     }
   }
 
@@ -266,7 +247,7 @@ export class ChatService {
     text?: string,
     media?: {
       url: string;
-      type: import('@prisma/client').MessageType;
+      type: import("@prisma/client").MessageType;
       fileName?: string;
       mimeType?: string;
       size?: number;
@@ -274,12 +255,14 @@ export class ChatService {
     },
   ) {
     if (senderId === recipientId) {
-      throw new BadRequestException('You cannot message yourself');
+      throw new BadRequestException("You cannot message yourself");
     }
 
-    const body = typeof text === 'string' ? text.trim() : '';
+    const body = typeof text === "string" ? text.trim() : "";
     if (!body && !media?.url) {
-      throw new BadRequestException('Message must contain text or a media file');
+      throw new BadRequestException(
+        "Message must contain text or a media file",
+      );
     }
     if (body.length > MAX_MESSAGE_LENGTH) {
       throw new BadRequestException(
@@ -287,7 +270,7 @@ export class ChatService {
       );
     }
     if (media && (!media.url || !media.type)) {
-      throw new BadRequestException('A valid media URL and type are required');
+      throw new BadRequestException("A valid media URL and type are required");
     }
 
     await Promise.all([
@@ -296,34 +279,23 @@ export class ChatService {
     ]);
 
     if (await this.isBlocked(senderId, recipientId)) {
-      throw new ForbiddenException(
-        'Messaging is blocked between these users',
-      );
+      throw new ForbiddenException("Messaging is blocked between these users");
     }
 
-    let conversation = await this.findConversation(
-      senderId,
-      recipientId,
-    );
+    let conversation = await this.findConversation(senderId, recipientId);
 
     let createdByThisRequest = false;
 
     if (!conversation) {
-      const verdict = await this.canStart(
-        senderId,
-        recipientId,
-      );
+      const verdict = await this.canStart(senderId, recipientId);
 
-      if (verdict === 'DENIED') {
+      if (verdict === "DENIED") {
         throw new ForbiddenException(
-          'This user is not accepting messages from you',
+          "This user is not accepting messages from you",
         );
       }
 
-      const [userAId, userBId] = sortUserPair(
-        senderId,
-        recipientId,
-      );
+      const [userAId, userBId] = sortUserPair(senderId, recipientId);
 
       try {
         conversation = await this.prisma.conversation.create({
@@ -333,7 +305,7 @@ export class ChatService {
             userBId,
             initiatorId: senderId,
             status:
-              verdict === 'REQUEST'
+              verdict === "REQUEST"
                 ? ConversationStatus.REQUESTED
                 : ConversationStatus.ACTIVE,
           },
@@ -345,12 +317,9 @@ export class ChatService {
         // between the initial lookup and the create operation.
         if (
           error instanceof Prisma.PrismaClientKnownRequestError &&
-          error.code === 'P2002'
+          error.code === "P2002"
         ) {
-          conversation = await this.findConversation(
-            senderId,
-            recipientId,
-          );
+          conversation = await this.findConversation(senderId, recipientId);
         } else {
           throw error;
         }
@@ -358,7 +327,7 @@ export class ChatService {
 
       if (!conversation) {
         throw new BadRequestException(
-          'Unable to start the conversation. Please try again.',
+          "Unable to start the conversation. Please try again.",
         );
       }
     }
@@ -366,7 +335,7 @@ export class ChatService {
     if (!createdByThisRequest) {
       if (await this.isBlocked(senderId, recipientId)) {
         throw new ForbiddenException(
-          'Messaging is blocked between these users',
+          "Messaging is blocked between these users",
         );
       }
 
@@ -374,17 +343,13 @@ export class ChatService {
         conversation.status === ConversationStatus.DECLINED &&
         conversation.initiatorId === senderId
       ) {
-        throw new ForbiddenException(
-          'Your message request was declined',
-        );
+        throw new ForbiddenException("Your message request was declined");
       }
 
-      if (
-        conversation.status === ConversationStatus.REQUESTED
-      ) {
+      if (conversation.status === ConversationStatus.REQUESTED) {
         if (conversation.initiatorId === senderId) {
           throw new ForbiddenException(
-            'Wait for the recipient to accept your message request',
+            "Wait for the recipient to accept your message request",
           );
         }
 
@@ -395,9 +360,7 @@ export class ChatService {
             status: ConversationStatus.ACTIVE,
           },
         });
-      } else if (
-        conversation.status === ConversationStatus.DECLINED
-      ) {
+      } else if (conversation.status === ConversationStatus.DECLINED) {
         // The recipient who declined can start messaging again.
         conversation = await this.prisma.conversation.update({
           where: { id: conversation.id },
@@ -412,9 +375,7 @@ export class ChatService {
       conversation.status !== ConversationStatus.ACTIVE &&
       conversation.status !== ConversationStatus.REQUESTED
     ) {
-      throw new ForbiddenException(
-        'This conversation is not available',
-      );
+      throw new ForbiddenException("This conversation is not available");
     }
 
     this.assertDirectConversation(conversation);
@@ -431,7 +392,7 @@ export class ChatService {
           conversationId: conversation.id,
           senderId,
           body: body || null,
-          type: media?.type ?? 'TEXT',
+          type: media?.type ?? "TEXT",
           mediaUrl: media?.url ?? null,
           mediaPublicId: media?.publicId ?? null,
           mediaFileName: media?.fileName ?? null,
@@ -454,16 +415,15 @@ export class ChatService {
     };
   }
 
-
   /**
    * Edits the sender's message only during the first 60 seconds.
    * The database update is conditional, so an expired edit window cannot
    * be bypassed by a client-side clock.
    */
   async updateMessage(userId: string, messageId: string, newText: string) {
-    const body = typeof newText === 'string' ? newText.trim() : '';
+    const body = typeof newText === "string" ? newText.trim() : "";
     if (!body) {
-      throw new BadRequestException('Updated message body cannot be empty');
+      throw new BadRequestException("Updated message body cannot be empty");
     }
     if (body.length > MAX_MESSAGE_LENGTH) {
       throw new BadRequestException(
@@ -476,21 +436,30 @@ export class ChatService {
       include: { conversation: true },
     });
     if (!message || message.deletedAt) {
-      throw new NotFoundException('Message not found');
+      throw new NotFoundException("Message not found");
     }
     if (message.senderId !== userId) {
-      throw new ForbiddenException('You can only edit your own messages');
+      throw new ForbiddenException("You can only edit your own messages");
     }
 
     this.assertDirectConversation(message.conversation);
-    if (![message.conversation.userAId, message.conversation.userBId].includes(userId)) {
-      throw new NotFoundException('Message not found');
+    if (
+      ![message.conversation.userAId, message.conversation.userBId].includes(
+        userId,
+      )
+    ) {
+      throw new NotFoundException("Message not found");
     }
     if (message.conversation.status !== ConversationStatus.ACTIVE) {
-      throw new ForbiddenException('This conversation is not active');
+      throw new ForbiddenException("This conversation is not active");
     }
-    if (await this.isBlocked(message.conversation.userAId, message.conversation.userBId)) {
-      throw new ForbiddenException('Messaging is blocked between these users');
+    if (
+      await this.isBlocked(
+        message.conversation.userAId,
+        message.conversation.userBId,
+      )
+    ) {
+      throw new ForbiddenException("Messaging is blocked between these users");
     }
 
     const cutoff = new Date(Date.now() - 60_000);
@@ -505,7 +474,9 @@ export class ChatService {
       data: { body, isEdited: true, editedAt: now },
     });
     if (result.count !== 1) {
-      throw new BadRequestException('Messages can only be edited within 1 minute of sending');
+      throw new BadRequestException(
+        "Messages can only be edited within 1 minute of sending",
+      );
     }
 
     return this.prisma.message.findUniqueOrThrow({ where: { id: messageId } });
@@ -521,15 +492,19 @@ export class ChatService {
       include: { conversation: true },
     });
     if (!message || message.deletedAt) {
-      throw new NotFoundException('Message not found');
+      throw new NotFoundException("Message not found");
     }
     if (message.senderId !== userId) {
-      throw new ForbiddenException('You can only delete your own messages');
+      throw new ForbiddenException("You can only delete your own messages");
     }
 
     this.assertDirectConversation(message.conversation);
-    if (![message.conversation.userAId, message.conversation.userBId].includes(userId)) {
-      throw new NotFoundException('Message not found');
+    if (
+      ![message.conversation.userAId, message.conversation.userBId].includes(
+        userId,
+      )
+    ) {
+      throw new NotFoundException("Message not found");
     }
 
     const deletedAt = new Date();
@@ -546,7 +521,7 @@ export class ChatService {
       },
     });
     if (result.count !== 1) {
-      throw new NotFoundException('Message not found');
+      throw new NotFoundException("Message not found");
     }
 
     return { id: messageId, conversationId: message.conversationId, deletedAt };
@@ -560,47 +535,29 @@ export class ChatService {
     conversationId: string,
     accept: boolean,
   ) {
-    const conversation =
-      await this.prisma.conversation.findUnique({
-        where: { id: conversationId },
-      });
+    const conversation = await this.prisma.conversation.findUnique({
+      where: { id: conversationId },
+    });
 
     if (!conversation) {
-      throw new NotFoundException(
-        'Conversation not found',
-      );
+      throw new NotFoundException("Conversation not found");
     }
 
     this.assertDirectConversation(conversation);
 
-    if (
-      ![conversation.userAId, conversation.userBId].includes(
-        userId,
-      )
-    ) {
-      throw new NotFoundException(
-        'Conversation not found',
-      );
+    if (![conversation.userAId, conversation.userBId].includes(userId)) {
+      throw new NotFoundException("Conversation not found");
     }
 
     if (
       conversation.status !== ConversationStatus.REQUESTED ||
       conversation.initiatorId === userId
     ) {
-      throw new BadRequestException(
-        'No pending request to answer',
-      );
+      throw new BadRequestException("No pending request to answer");
     }
 
-    if (
-      await this.isBlocked(
-        conversation.userAId,
-        conversation.userBId,
-      )
-    ) {
-      throw new ForbiddenException(
-        'Messaging is blocked between these users',
-      );
+    if (await this.isBlocked(conversation.userAId, conversation.userBId)) {
+      throw new ForbiddenException("Messaging is blocked between these users");
     }
 
     const updated = await this.prisma.conversation.update({
@@ -629,19 +586,13 @@ export class ChatService {
    * When requestsOnly is true, only pending requests received
    * from other users are returned.
    */
-  async conversations(
-    userId: string,
-    requestsOnly = false,
-  ) {
+  async conversations(userId: string, requestsOnly = false) {
     await this.assertActiveUser(userId);
 
     const items = await this.prisma.conversation.findMany({
       where: {
         type: ConversationType.DIRECT,
-        OR: [
-          { userAId: userId },
-          { userBId: userId },
-        ],
+        OR: [{ userAId: userId }, { userBId: userId }],
         ...(requestsOnly
           ? {
               status: ConversationStatus.REQUESTED,
@@ -649,10 +600,7 @@ export class ChatService {
             }
           : {
               status: {
-                in: [
-                  ConversationStatus.ACTIVE,
-                  ConversationStatus.REQUESTED,
-                ],
+                in: [ConversationStatus.ACTIVE, ConversationStatus.REQUESTED],
               },
             }),
       },
@@ -660,30 +608,28 @@ export class ChatService {
         userA: {
           select: {
             id: true,
-            fullName: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
             avatarUrl: true,
           },
         },
         userB: {
           select: {
             id: true,
-            fullName: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
             avatarUrl: true,
           },
         },
         messages: {
           where: { deletedAt: null },
-          orderBy: [
-            { createdAt: 'desc' },
-            { id: 'desc' },
-          ],
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: 1,
         },
       },
-      orderBy: [
-        { updatedAt: 'desc' },
-        { id: 'desc' },
-      ],
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
       take: MAX_CONVERSATIONS,
     });
 
@@ -691,10 +637,7 @@ export class ChatService {
     // blocked the other.
     const blocks = await this.prisma.block.findMany({
       where: {
-        OR: [
-          { blockerId: userId },
-          { blockedId: userId },
-        ],
+        OR: [{ blockerId: userId }, { blockedId: userId }],
       },
       select: {
         blockerId: true,
@@ -706,100 +649,81 @@ export class ChatService {
 
     for (const block of blocks) {
       blockedUserIds.add(
-        block.blockerId === userId
-          ? block.blockedId
-          : block.blockerId,
+        block.blockerId === userId ? block.blockedId : block.blockerId,
       );
     }
 
     return items
       .filter((item) => {
         const otherUserId =
-          item.userAId === userId
-            ? item.userBId
-            : item.userAId;
+          item.userAId === userId ? item.userBId : item.userAId;
 
-        return (
-          otherUserId !== null &&
-          !blockedUserIds.has(otherUserId)
-        );
+        return otherUserId !== null && !blockedUserIds.has(otherUserId);
       })
-      .map((item) => ({
-        id: item.id,
-        status: item.status,
-        initiatorId: item.initiatorId,
-        other:
-          item.userAId === userId
-            ? item.userB
-            : item.userA,
-        lastMessage: item.messages[0] ?? null,
-      }));
+      .map((item) => {
+        const otherUser = item.userAId === userId ? item.userB : item.userA;
+
+        return {
+          id: item.id,
+          status: item.status,
+          initiatorId: item.initiatorId,
+          other: otherUser
+            ? {
+                ...otherUser,
+                displayName: [
+                  otherUser.firstName,
+                  otherUser.otherNames,
+                  otherUser.lastName,
+                ]
+                  .filter((name) => name?.trim())
+                  .join(" "),
+              }
+            : null,
+          lastMessage: item.messages[0] ?? null,
+        };
+      });
   }
 
   /**
    * Retrieves the newest 50 messages, or the next page before
    * the supplied message cursor.
    */
-  async messages(
-    userId: string,
-    conversationId: string,
-    cursor?: string,
-  ) {
-    const conversation =
-      await this.prisma.conversation.findUnique({
-        where: { id: conversationId },
-      });
+  async messages(userId: string, conversationId: string, cursor?: string) {
+    const conversation = await this.prisma.conversation.findUnique({
+      where: { id: conversationId },
+    });
 
     if (!conversation) {
-      throw new NotFoundException(
-        'Conversation not found',
-      );
+      throw new NotFoundException("Conversation not found");
     }
 
     this.assertDirectConversation(conversation);
 
-    if (
-      ![
-        conversation.userAId,
-        conversation.userBId,
-      ].includes(userId)
-    ) {
-      throw new NotFoundException(
-        'Conversation not found',
-      );
+    if (![conversation.userAId, conversation.userBId].includes(userId)) {
+      throw new NotFoundException("Conversation not found");
     }
 
     if (conversation.status !== ConversationStatus.ACTIVE) {
       throw new ForbiddenException(
-        'Accept this message request to view the conversation',
+        "Accept this message request to view the conversation",
       );
     }
 
-    if (
-      await this.isBlocked(
-        conversation.userAId,
-        conversation.userBId,
-      )
-    ) {
-      throw new ForbiddenException(
-        'Messaging is blocked between these users',
-      );
+    if (await this.isBlocked(conversation.userAId, conversation.userBId)) {
+      throw new ForbiddenException("Messaging is blocked between these users");
     }
 
     if (cursor) {
-      const cursorMessage =
-        await this.prisma.message.findFirst({
-          where: {
-            id: cursor,
-            conversationId,
-          },
-          select: { id: true },
-        });
+      const cursorMessage = await this.prisma.message.findFirst({
+        where: {
+          id: cursor,
+          conversationId,
+        },
+        select: { id: true },
+      });
 
       if (!cursorMessage) {
-        throw new BadRequestException(
-          'Invalid message cursor',
-        );
+        throw new BadRequestException("Invalid message cursor");
       }
     }
 
@@ -824,10 +748,7 @@ export class ChatService {
         conversationId,
         deletedAt: null,
       },
-      orderBy: [
-        { createdAt: 'desc' },
-        { id: 'desc' },
-      ],
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: MESSAGE_PAGE_SIZE,
       ...(cursor
         ? {
@@ -841,49 +762,27 @@ export class ChatService {
   /**
    * Explicitly updates the current user's read position.
    */
-  async markRead(
-    userId: string,
-    conversationId: string,
-  ) {
-    const conversation =
-      await this.prisma.conversation.findUnique({
-        where: { id: conversationId },
-      });
+  async markRead(userId: string, conversationId: string) {
+    const conversation = await this.prisma.conversation.findUnique({
+      where: { id: conversationId },
+    });
 
     if (!conversation) {
-      throw new NotFoundException(
-        'Conversation not found',
-      );
+      throw new NotFoundException("Conversation not found");
     }
 
     this.assertDirectConversation(conversation);
 
-    if (
-      ![
-        conversation.userAId,
-        conversation.userBId,
-      ].includes(userId)
-    ) {
-      throw new NotFoundException(
-        'Conversation not found',
-      );
+    if (![conversation.userAId, conversation.userBId].includes(userId)) {
+      throw new NotFoundException("Conversation not found");
     }
 
     if (conversation.status !== ConversationStatus.ACTIVE) {
-      throw new ForbiddenException(
-        'This conversation is not active',
-      );
+      throw new ForbiddenException("This conversation is not active");
     }
 
-    if (
-      await this.isBlocked(
-        conversation.userAId,
-        conversation.userBId,
-      )
-    ) {
-      throw new ForbiddenException(
-        'Messaging is blocked between these users',
-      );
+    if (await this.isBlocked(conversation.userAId, conversation.userBId)) {
+      throw new ForbiddenException("Messaging is blocked between these users");
     }
 
     await this.ensureConversationMembers(
@@ -912,33 +811,24 @@ export class ChatService {
   /**
    * Returns participant IDs for an authorized conversation.
    */
-  async getConversationParticipants(
-    userId: string,
-    conversationId: string,
-  ) {
-    const conversation =
-      await this.prisma.conversation.findUnique({
-        where: { id: conversationId },
-        select: {
-          type: true,
-          userAId: true,
-          userBId: true,
-        },
-      });
+  async getConversationParticipants(userId: string, conversationId: string) {
+    const conversation = await this.prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        type: true,
+        userAId: true,
+        userBId: true,
+      },
+    });
 
     if (
       !conversation ||
-      conversation.type !== 'DIRECT' ||
+      conversation.type !== "DIRECT" ||
       !conversation.userAId ||
       !conversation.userBId ||
-      ![
-        conversation.userAId,
-        conversation.userBId,
-      ].includes(userId)
+      ![conversation.userAId, conversation.userBId].includes(userId)
     ) {
-      throw new NotFoundException(
-        'Conversation not found',
-      );
+      throw new NotFoundException("Conversation not found");
     }
 
     return {
@@ -954,10 +844,7 @@ export class ChatService {
   /**
    * Updates the user's chat privacy setting.
    */
-  async setPrivacy(
-    userId: string,
-    chatPrivacy: ChatPrivacy,
-  ) {
+  async setPrivacy(userId: string, chatPrivacy: ChatPrivacy) {
     await this.assertActiveUser(userId);
 
     return this.prisma.user.update({
@@ -974,14 +861,9 @@ export class ChatService {
    * Blocks another user. The unique constraint prevents duplicate
    * block records for the same direction.
    */
-  async block(
-    blockerId: string,
-    blockedId: string,
-  ) {
+  async block(blockerId: string, blockedId: string) {
     if (blockerId === blockedId) {
-      throw new BadRequestException(
-        'You cannot block yourself',
-      );
+      throw new BadRequestException("You cannot block yourself");
     }
 
     await Promise.all([
@@ -1009,10 +891,7 @@ export class ChatService {
   /**
    * Removes a block created by the requesting user.
    */
-  async unblock(
-    blockerId: string,
-    blockedId: string,
-  ) {
+  async unblock(blockerId: string, blockedId: string) {
     await this.prisma.block.deleteMany({
       where: {
         blockerId,

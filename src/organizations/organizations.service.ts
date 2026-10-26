@@ -4,40 +4,40 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-} from '@nestjs/common';
+} from "@nestjs/common";
 
 import {
   MembershipRole,
   MembershipStatus,
   OrgType,
   Prisma,
-} from '@prisma/client';
+} from "@prisma/client";
 
-import { PrismaService } from '../prisma/prisma.service';
-import { MailService } from '../mail/mail.service';
-import { PermissionsService } from '../common/permissions/permissions.service';
+import { PrismaService } from "../prisma/prisma.service";
+import { MailService } from "../mail/mail.service";
+import { PermissionsService } from "../common/permissions/permissions.service";
 import {
   TOP_ROLE,
   allowedRoles,
   rolesWith,
-} from '../common/permissions/permissions';
-import { AuthUser } from '../common/decorators/current-user.decorator';
+} from "../common/permissions/permissions";
+import { AuthUser } from "../common/decorators/current-user.decorator";
 import {
   AddMemberDto,
   BroadcastEmailDto,
   CreateOrgDto,
   JoinOrgDto,
   ReviewMembershipDto,
-} from './dto';
+} from "./dto";
 
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>"']/g, (char) => {
     const entities: Record<string, string> = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;',
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
     };
 
     return entities[char];
@@ -75,7 +75,7 @@ export class OrganizationsService {
       !roles.includes(membership.role)
     ) {
       throw new ForbiddenException(
-        'You do not have permission to perform this action in this organization.',
+        "You do not have permission to perform this action in this organization.",
       );
     }
 
@@ -88,7 +88,7 @@ export class OrganizationsService {
     });
 
     if (!organization) {
-      throw new NotFoundException('Organization not found.');
+      throw new NotFoundException("Organization not found.");
     }
 
     return organization;
@@ -141,10 +141,10 @@ export class OrganizationsService {
     } catch (error: unknown) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
+        error.code === "P2002"
       ) {
         throw new ConflictException(
-          'An organization with the supplied unique details already exists.',
+          "An organization with the supplied unique details already exists.",
         );
       }
 
@@ -162,12 +162,12 @@ export class OrganizationsService {
           ? {
               name: {
                 contains: term,
-                mode: 'insensitive',
+                mode: "insensitive",
               },
             }
           : {}),
       },
-      orderBy: { name: 'asc' },
+      orderBy: { name: "asc" },
       take: 50,
     });
   }
@@ -176,7 +176,7 @@ export class OrganizationsService {
     return this.prisma.membership.findMany({
       where: { userId },
       include: { organization: true },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
     });
   }
 
@@ -185,7 +185,7 @@ export class OrganizationsService {
 
     if (organization.type === OrgType.SHOP) {
       throw new BadRequestException(
-        'Shops add their staff directly. Ask the owner or manager to add you.',
+        "Shops add their staff directly. Ask the owner or manager to add you.",
       );
     }
 
@@ -221,10 +221,10 @@ export class OrganizationsService {
       // Another request may have created the membership concurrently.
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
+        error.code === "P2002"
       ) {
         throw new ConflictException(
-          'You already have a membership or pending request for this organization.',
+          "You already have a membership or pending request for this organization.",
         );
       }
 
@@ -236,7 +236,7 @@ export class OrganizationsService {
       where: {
         organizationId: orgId,
         status: MembershipStatus.APPROVED,
-        role: { in: rolesWith(organization.type, 'members.manage') },
+        role: { in: rolesWith(organization.type, "members.manage") },
       },
       select: { userId: true },
     });
@@ -245,7 +245,7 @@ export class OrganizationsService {
       await this.prisma.notification.createMany({
         data: approvers.map((approver) => ({
           userId: approver.userId,
-          title: 'New join request',
+          title: "New join request",
           body: `A new user has requested to join ${organization.name}.`,
         })),
       });
@@ -259,7 +259,7 @@ export class OrganizationsService {
    */
   async addMember(user: AuthUser, orgId: string, dto: AddMemberDto) {
     const organization = await this.getOrThrow(orgId);
-    const actor = await this.permissions.assert(user, orgId, 'members.manage');
+    const actor = await this.permissions.assert(user, orgId, "members.manage");
 
     this.assertCanAssign(organization.type, actor?.role ?? null, dto.role);
 
@@ -270,7 +270,7 @@ export class OrganizationsService {
 
     if (!target || !target.isActive) {
       throw new NotFoundException(
-        'No active user found with that phone number.',
+        "No active user found with that phone number.",
       );
     }
 
@@ -289,10 +289,10 @@ export class OrganizationsService {
       await this.prisma.notification.create({
         data: {
           userId: target.id,
-          title: 'Added to an organization',
+          title: "Added to an organization",
           body: `You were added to ${organization.name} as ${dto.role
             .toLowerCase()
-            .replace(/_/g, ' ')}.`,
+            .replace(/_/g, " ")}.`,
         },
       });
 
@@ -300,10 +300,10 @@ export class OrganizationsService {
     } catch (error: unknown) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
+        error.code === "P2002"
       ) {
         throw new ConflictException(
-          'That user already has a membership in this organization.',
+          "That user already has a membership in this organization.",
         );
       }
 
@@ -311,12 +311,8 @@ export class OrganizationsService {
     }
   }
 
-  async listMembers(
-    user: AuthUser,
-    orgId: string,
-    status?: MembershipStatus,
-  ) {
-    await this.permissions.assert(user, orgId, 'members.view');
+  async listMembers(user: AuthUser, orgId: string, status?: MembershipStatus) {
+    await this.permissions.assert(user, orgId, "members.view");
 
     return this.prisma.membership.findMany({
       where: {
@@ -327,13 +323,15 @@ export class OrganizationsService {
         user: {
           select: {
             id: true,
-            fullName: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
             phone: true,
             email: true,
           },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
     });
   }
 
@@ -344,7 +342,7 @@ export class OrganizationsService {
     dto: ReviewMembershipDto,
   ) {
     const organization = await this.getOrThrow(orgId);
-    const actor = await this.permissions.assert(user, orgId, 'members.manage');
+    const actor = await this.permissions.assert(user, orgId, "members.manage");
 
     const membership = await this.prisma.membership.findFirst({
       where: {
@@ -355,7 +353,9 @@ export class OrganizationsService {
         user: {
           select: {
             id: true,
-            fullName: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
             email: true,
           },
         },
@@ -369,7 +369,7 @@ export class OrganizationsService {
     });
 
     if (!membership) {
-      throw new NotFoundException('Membership not found.');
+      throw new NotFoundException("Membership not found.");
     }
 
     if (
@@ -378,7 +378,7 @@ export class OrganizationsService {
         (dto.role !== undefined && dto.role !== membership.role))
     ) {
       throw new BadRequestException(
-        'You cannot demote yourself or change your own membership role through this endpoint.',
+        "You cannot demote yourself or change your own membership role through this endpoint.",
       );
     }
 
@@ -408,7 +408,7 @@ export class OrganizationsService {
     await this.prisma.notification.create({
       data: {
         userId: membership.userId,
-        title: 'Membership update',
+        title: "Membership update",
         body,
       },
     });
@@ -418,23 +418,15 @@ export class OrganizationsService {
 
       // Don't let a mail provider failure undo the membership update.
       void this.mail
-        .send(
-          membership.user.email,
-          'Membership update',
-          `<p>${safeBody}</p>`,
-        )
+        .send(membership.user.email, "Membership update", `<p>${safeBody}</p>`)
         .catch(() => undefined);
     }
 
     return updated;
   }
 
-  async broadcastEmail(
-    user: AuthUser,
-    orgId: string,
-    dto: BroadcastEmailDto,
-  ) {
-    await this.permissions.assert(user, orgId, 'email.broadcast');
+  async broadcastEmail(user: AuthUser, orgId: string, dto: BroadcastEmailDto) {
+    await this.permissions.assert(user, orgId, "email.broadcast");
 
     const organization = await this.getOrThrow(orgId);
 
@@ -459,7 +451,7 @@ export class OrganizationsService {
       .filter((email): email is string => email !== null);
 
     const safeName = escapeHtml(organization.name);
-    const safeBody = escapeHtml(dto.body).replace(/\r?\n/g, '<br/>');
+    const safeBody = escapeHtml(dto.body).replace(/\r?\n/g, "<br/>");
     const html = `<h3>${safeName}</h3><div>${safeBody}</div>`;
 
     const sent = await this.mail.sendBulk(

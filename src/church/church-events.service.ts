@@ -4,19 +4,19 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-} from '@nestjs/common';
-import { EventStatus, Prisma } from '@prisma/client';
+} from "@nestjs/common";
+import { EventStatus, Prisma } from "@prisma/client";
 
-import { PrismaService } from '../prisma/prisma.service';
-import { PermissionsService } from '../common/permissions/permissions.service';
-import { AuthUser } from '../common/decorators/current-user.decorator';
-import { NotificationsService } from '../notifications/notifications.service';
-import { ChurchAccessService } from './church-access.service';
+import { PrismaService } from "../prisma/prisma.service";
+import { PermissionsService } from "../common/permissions/permissions.service";
+import { AuthUser } from "../common/decorators/current-user.decorator";
+import { NotificationsService } from "../notifications/notifications.service";
+import { ChurchAccessService } from "./church-access.service";
 import {
   CreateEventDto,
   MarkAttendanceDto,
   UpdateEventDto,
-} from './dto/church.dto';
+} from "./dto/church.dto";
 
 /** Events without an end time count as running for this long. */
 const DEFAULT_DURATION_MS = 6 * 60 * 60 * 1000;
@@ -47,7 +47,7 @@ export class ChurchEventsService {
     const rows = await this.prisma.membership.findMany({
       where: {
         organizationId,
-        status: 'APPROVED',
+        status: "APPROVED",
         ...(excludeUserId ? { userId: { not: excludeUserId } } : {}),
       },
       select: { userId: true },
@@ -57,13 +57,18 @@ export class ChurchEventsService {
   }
 
   private async announce(
-    event: { id: string; organizationId: string; title: string; startsAt: Date },
+    event: {
+      id: string;
+      organizationId: string;
+      title: string;
+      startsAt: Date;
+    },
     actorId: string,
   ) {
     await this.notifications.send(
       await this.approvedMemberIds(event.organizationId, actorId),
       {
-        type: 'EVENT',
+        type: "EVENT",
         title: `New event: ${event.title}`,
         body: `Starts ${event.startsAt.toUTCString()}`,
         data: {
@@ -76,19 +81,23 @@ export class ChurchEventsService {
   }
 
   async create(user: AuthUser, organizationId: string, dto: CreateEventDto) {
-    await this.permissions.assert(user, organizationId, 'event.manage');
+    await this.permissions.assert(user, organizationId, "event.manage");
 
     const status = dto.status ?? EventStatus.DRAFT;
 
     if (status === EventStatus.CANCELLED || status === EventStatus.COMPLETED) {
-      throw new BadRequestException('A new event must be a draft or published.');
+      throw new BadRequestException(
+        "A new event must be a draft or published.",
+      );
     }
 
-    const startsAt = this.parseDate(dto.startsAt, 'startsAt');
-    const endsAt = dto.endsAt ? this.parseDate(dto.endsAt, 'endsAt') : undefined;
+    const startsAt = this.parseDate(dto.startsAt, "startsAt");
+    const endsAt = dto.endsAt
+      ? this.parseDate(dto.endsAt, "endsAt")
+      : undefined;
 
     if (endsAt && endsAt <= startsAt) {
-      throw new BadRequestException('endsAt must be after startsAt.');
+      throw new BadRequestException("endsAt must be after startsAt.");
     }
 
     const event = await this.prisma.event.create({
@@ -118,28 +127,30 @@ export class ChurchEventsService {
     });
 
     if (!event) {
-      throw new NotFoundException('Event not found.');
+      throw new NotFoundException("Event not found.");
     }
 
-    await this.permissions.assert(user, event.organizationId, 'event.manage');
+    await this.permissions.assert(user, event.organizationId, "event.manage");
 
-    if (event.status === 'CANCELLED' || event.status === 'COMPLETED') {
-      throw new BadRequestException('A closed event cannot be edited.');
+    if (event.status === "CANCELLED" || event.status === "COMPLETED") {
+      throw new BadRequestException("A closed event cannot be edited.");
     }
 
-    if (dto.status === 'DRAFT' && event.status !== 'DRAFT') {
-      throw new BadRequestException('A published event cannot go back to draft.');
+    if (dto.status === "DRAFT" && event.status !== "DRAFT") {
+      throw new BadRequestException(
+        "A published event cannot go back to draft.",
+      );
     }
 
     const startsAt = dto.startsAt
-      ? this.parseDate(dto.startsAt, 'startsAt')
+      ? this.parseDate(dto.startsAt, "startsAt")
       : event.startsAt;
     const endsAt = dto.endsAt
-      ? this.parseDate(dto.endsAt, 'endsAt')
+      ? this.parseDate(dto.endsAt, "endsAt")
       : event.endsAt;
 
     if (endsAt && endsAt <= startsAt) {
-      throw new BadRequestException('endsAt must be after startsAt.');
+      throw new BadRequestException("endsAt must be after startsAt.");
     }
 
     if (
@@ -158,7 +169,9 @@ export class ChurchEventsService {
         ...(dto.description !== undefined
           ? { description: dto.description.trim() }
           : {}),
-        ...(dto.location !== undefined ? { location: dto.location.trim() } : {}),
+        ...(dto.location !== undefined
+          ? { location: dto.location.trim() }
+          : {}),
         ...(dto.startsAt !== undefined ? { startsAt } : {}),
         ...(dto.endsAt !== undefined ? { endsAt } : {}),
         ...(dto.capacity !== undefined ? { capacity: dto.capacity } : {}),
@@ -166,11 +179,11 @@ export class ChurchEventsService {
       },
     });
 
-    if (dto.status === 'PUBLISHED' && event.status !== 'PUBLISHED') {
+    if (dto.status === "PUBLISHED" && event.status !== "PUBLISHED") {
       await this.announce(updated, user.id);
     }
 
-    if (dto.status === 'CANCELLED') {
+    if (dto.status === "CANCELLED") {
       const registrants = await this.prisma.eventRegistration.findMany({
         where: { eventId: id },
         select: { userId: true },
@@ -179,9 +192,9 @@ export class ChurchEventsService {
       await this.notifications.send(
         registrants.map((row) => row.userId),
         {
-          type: 'EVENT',
+          type: "EVENT",
           title: `Cancelled: ${updated.title}`,
-          body: 'This event has been cancelled.',
+          body: "This event has been cancelled.",
           data: { eventId: id, organizationId: updated.organizationId },
         },
       );
@@ -198,7 +211,7 @@ export class ChurchEventsService {
     const canManage = await this.permissions.can(
       user,
       organizationId,
-      'event.manage',
+      "event.manage",
     );
 
     if (!canManage) {
@@ -212,12 +225,14 @@ export class ChurchEventsService {
         ? { organizationId, ...(status ? { status } : {}) }
         : {
             organizationId,
-            status: 'PUBLISHED',
+            status: "PUBLISHED",
             OR: [
               { endsAt: { gte: now } },
               {
                 endsAt: null,
-                startsAt: { gte: new Date(now.getTime() - DEFAULT_DURATION_MS) },
+                startsAt: {
+                  gte: new Date(now.getTime() - DEFAULT_DURATION_MS),
+                },
               },
             ],
           },
@@ -228,7 +243,7 @@ export class ChurchEventsService {
           select: { id: true, checkedInAt: true },
         },
       },
-      orderBy: { startsAt: 'asc' },
+      orderBy: { startsAt: "asc" },
       take: 100,
     });
 
@@ -246,8 +261,8 @@ export class ChurchEventsService {
       include: { organization: { select: { type: true } } },
     });
 
-    if (!event || event.status !== 'PUBLISHED') {
-      throw new NotFoundException('Event not found.');
+    if (!event || event.status !== "PUBLISHED") {
+      throw new NotFoundException("Event not found.");
     }
 
     await this.access.assertMember(user, event.organizationId);
@@ -256,12 +271,12 @@ export class ChurchEventsService {
       event.endsAt ?? new Date(event.startsAt.getTime() + DEFAULT_DURATION_MS);
 
     if (end < new Date()) {
-      throw new BadRequestException('This event has ended.');
+      throw new BadRequestException("This event has ended.");
     }
 
     const worship =
-      event.organization.type === 'CHURCH' ||
-      event.organization.type === 'MOSQUE';
+      event.organization.type === "CHURCH" ||
+      event.organization.type === "MOSQUE";
 
     const churchMemberId = worship
       ? (await this.access.ensureMember(user.id, event.organizationId)).id
@@ -278,7 +293,7 @@ export class ChurchEventsService {
           });
 
           if (taken >= event.capacity) {
-            throw new ConflictException('This event is full.');
+            throw new ConflictException("This event is full.");
           }
         }
 
@@ -289,9 +304,9 @@ export class ChurchEventsService {
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
+        error.code === "P2002"
       ) {
-        throw new ConflictException('You are already registered.');
+        throw new ConflictException("You are already registered.");
       }
 
       throw error;
@@ -308,18 +323,28 @@ export class ChurchEventsService {
   }
 
   private async loadForStaff(user: AuthUser, eventId: string) {
-    const event = await this.prisma.event.findUnique({ where: { id: eventId } });
+    const event = await this.prisma.event.findUnique({
+      where: { id: eventId },
+    });
 
     if (!event) {
-      throw new NotFoundException('Event not found.');
+      throw new NotFoundException("Event not found.");
     }
 
     const allowed =
-      (await this.permissions.can(user, event.organizationId, 'event.manage')) ||
-      (await this.permissions.can(user, event.organizationId, 'attendance.mark'));
+      (await this.permissions.can(
+        user,
+        event.organizationId,
+        "event.manage",
+      )) ||
+      (await this.permissions.can(
+        user,
+        event.organizationId,
+        "attendance.mark",
+      ));
 
     if (!allowed) {
-      throw new ForbiddenException('You do not have permission to do this');
+      throw new ForbiddenException("You do not have permission to do this");
     }
 
     return event;
@@ -330,21 +355,41 @@ export class ChurchEventsService {
 
     return this.prisma.eventRegistration.findMany({
       where: { eventId },
-      include: { user: { select: { id: true, fullName: true, phone: true } } },
-      orderBy: { registeredAt: 'asc' },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
+            phone: true,
+          },
+        },
+      },
+      orderBy: { registeredAt: "asc" },
     });
   }
 
   /** Marks attendance for several members at once, creating or updating each. */
-  async markAttendance(user: AuthUser, eventId: string, dto: MarkAttendanceDto) {
-    const event = await this.prisma.event.findUnique({ where: { id: eventId } });
+  async markAttendance(
+    user: AuthUser,
+    eventId: string,
+    dto: MarkAttendanceDto,
+  ) {
+    const event = await this.prisma.event.findUnique({
+      where: { id: eventId },
+    });
 
     if (!event) {
-      throw new NotFoundException('Event not found.');
+      throw new NotFoundException("Event not found.");
     }
 
     await this.access.assertWorship(event.organizationId);
-    await this.permissions.assert(user, event.organizationId, 'attendance.mark');
+    await this.permissions.assert(
+      user,
+      event.organizationId,
+      "attendance.mark",
+    );
 
     const entries = [
       ...new Map(dto.entries.map((entry) => [entry.userId, entry])).values(),
@@ -353,7 +398,7 @@ export class ChurchEventsService {
     const members = await this.prisma.membership.findMany({
       where: {
         organizationId: event.organizationId,
-        status: 'APPROVED',
+        status: "APPROVED",
         userId: { in: entries.map((entry) => entry.userId) },
       },
       select: { userId: true },
@@ -361,7 +406,7 @@ export class ChurchEventsService {
 
     if (members.length !== entries.length) {
       throw new BadRequestException(
-        'Every person listed must be an approved member of this organization.',
+        "Every person listed must be an approved member of this organization.",
       );
     }
 
@@ -385,7 +430,7 @@ export class ChurchEventsService {
             update: {},
           });
 
-          const status = entry.status ?? 'PRESENT';
+          const status = entry.status ?? "PRESENT";
 
           const existing = await tx.attendance.findFirst({
             where: { eventId, churchMemberId: member.id },
@@ -411,7 +456,7 @@ export class ChurchEventsService {
             });
           }
 
-          if (status === 'PRESENT' || status === 'LATE') {
+          if (status === "PRESENT" || status === "LATE") {
             await tx.eventRegistration.updateMany({
               where: { eventId, userId: entry.userId, checkedInAt: null },
               data: { checkedInAt: now },
@@ -426,13 +471,19 @@ export class ChurchEventsService {
   }
 
   async attendance(user: AuthUser, eventId: string) {
-    const event = await this.prisma.event.findUnique({ where: { id: eventId } });
+    const event = await this.prisma.event.findUnique({
+      where: { id: eventId },
+    });
 
     if (!event) {
-      throw new NotFoundException('Event not found.');
+      throw new NotFoundException("Event not found.");
     }
 
-    await this.permissions.assert(user, event.organizationId, 'attendance.mark');
+    await this.permissions.assert(
+      user,
+      event.organizationId,
+      "attendance.mark",
+    );
 
     return this.prisma.attendance.findMany({
       where: { eventId },
@@ -441,11 +492,18 @@ export class ChurchEventsService {
           select: {
             id: true,
             memberNumber: true,
-            user: { select: { id: true, fullName: true } },
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                otherNames: true,
+                lastName: true,
+              },
+            },
           },
         },
       },
-      orderBy: { date: 'asc' },
+      orderBy: { date: "asc" },
     });
   }
 }

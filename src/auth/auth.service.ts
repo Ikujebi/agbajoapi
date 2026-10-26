@@ -21,14 +21,16 @@ import { ChangePasswordDto, ResetPasswordDto } from './dto/password.dto';
 
 const userSelect = {
   id: true,
-  fullName: true,
+  firstName: true,
+  lastName: true,
+  otherNames: true,
   email: true,
   phone: true,
   avatarUrl: true,
   chatPrivacy: true,
   isSuperAdmin: true,
   createdAt: true,
-} as const;
+} satisfies Prisma.UserSelect;
 
 const REFRESH_TOKEN_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -48,9 +50,24 @@ interface RefreshPayload {
   jti: string;
 }
 
+type UserNameFields = {
+  firstName: string;
+  lastName: string;
+  otherNames: string | null;
+};
+
+const formatFullName = (user: UserNameFields): string =>
+  [user.firstName, user.otherNames, user.lastName]
+    .map((name) => name?.trim())
+    .filter((name) => Boolean(name))
+    .join(' ');
+
 const toPublicUser = (user: User) => ({
   id: user.id,
-  fullName: user.fullName,
+  firstName: user.firstName,
+  lastName: user.lastName,
+  otherNames: user.otherNames,
+  fullName: formatFullName(user),
   email: user.email,
   phone: user.phone,
   avatarUrl: user.avatarUrl,
@@ -80,7 +97,13 @@ export class AuthService {
   }
 
   private hashesMatch(a: string, b: string): boolean {
-    return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+    const aBuffer = Buffer.from(a, 'hex');
+    const bBuffer = Buffer.from(b, 'hex');
+
+    return (
+      aBuffer.length === bBuffer.length &&
+      timingSafeEqual(aBuffer, bBuffer)
+    );
   }
 
   /** Email (contains @) or phone in any common format. */
@@ -95,12 +118,16 @@ export class AuthService {
 
     const phone = tryNormalizePhone(value);
 
-    return phone ? this.prisma.user.findUnique({ where: { phone } }) : null;
+    return phone
+      ? this.prisma.user.findUnique({ where: { phone } })
+      : null;
   }
 
   private async issueTokens(userId: string) {
-    const accessSecret = this.config.getOrThrow<string>('JWT_ACCESS_SECRET');
-    const refreshSecret = this.config.getOrThrow<string>('JWT_REFRESH_SECRET');
+    const accessSecret =
+      this.config.getOrThrow<string>('JWT_ACCESS_SECRET');
+    const refreshSecret =
+      this.config.getOrThrow<string>('JWT_REFRESH_SECRET');
 
     const accessToken = await this.jwt.signAsync(
       { sub: userId },
@@ -124,11 +151,23 @@ export class AuthService {
   }
 
   async register(dto: RegisterDto) {
+    const firstName = dto.firstName.trim();
+    const lastName = dto.lastName.trim();
+    const otherNames = dto.otherNames?.trim() || null;
+
+    if (!firstName || !lastName) {
+      throw new BadRequestException(
+        'First name and surname are required.',
+      );
+    }
+
     const phone = normalizePhone(dto.phone);
     const email = dto.email?.trim().toLowerCase() || undefined;
 
     const exists = await this.prisma.user.findFirst({
-      where: { OR: [{ phone }, ...(email ? [{ email }] : [])] },
+      where: {
+        OR: [{ phone }, ...(email ? [{ email }] : [])],
+      },
       select: { id: true },
     });
 
@@ -139,7 +178,9 @@ export class AuthService {
     try {
       const user = await this.prisma.user.create({
         data: {
-          fullName: dto.fullName.trim(),
+          firstName,
+          lastName,
+          otherNames,
           phone,
           ...(email ? { email } : {}),
           passwordHash: await bcrypt.hash(dto.password, 10),
@@ -149,10 +190,15 @@ export class AuthService {
 
       const tokens = await this.issueTokens(user.id);
 
-      return { user, ...tokens };
+      return {
+        user: {
+          ...user,
+          fullName: formatFullName(user),
+        },
+        ...tokens,
+      };
     } catch (error) {
-      // The unique constraints are the final protection against
-      // simultaneous registrations with the same details.
+      // Unique constraints protect against simultaneous registrations.
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
@@ -183,7 +229,10 @@ export class AuthService {
   }
 
   async refresh(refreshToken: string) {
-    if (typeof refreshToken !== 'string' || refreshToken.trim().length === 0) {
+    if (
+      typeof refreshToken !== 'string' ||
+      refreshToken.trim().length === 0
+    ) {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
@@ -249,7 +298,10 @@ export class AuthService {
   }
 
   async logout(refreshToken: string) {
-    if (typeof refreshToken !== 'string' || refreshToken.trim().length === 0) {
+    if (
+      typeof refreshToken !== 'string' ||
+      refreshToken.trim().length === 0
+    ) {
       return { ok: true };
     }
 
@@ -261,10 +313,19 @@ export class AuthService {
   }
 
   async me(userId: string) {
-    return this.prisma.user.findUnique({
+    const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: userSelect,
     });
+
+    if (!user) {
+      return null;
+    }
+
+    return {
+      ...user,
+      fullName: formatFullName(user),
+    };
   }
 
   // ---------- passwords ----------
@@ -281,7 +342,9 @@ export class AuthService {
 
     const user = await this.findByIdentifier(identifier);
 
-    if (!user || !user.isActive) return response;
+    if (!user || !user.isActive) {
+      return response;
+    }
 
     const purpose = OtpPurpose.PASSWORD_RESET;
     const channel: OtpChannel = identifier.includes('@')
@@ -292,11 +355,15 @@ export class AuthService {
       where: {
         userId: user.id,
         purpose,
-        createdAt: { gt: new Date(Date.now() - 60 * 60 * 1000) },
+        createdAt: {
+          gt: new Date(Date.now() - 60 * 60 * 1000),
+        },
       },
     });
 
-    if (recent >= OTP_MAX_PER_HOUR) return response;
+    if (recent >= OTP_MAX_PER_HOUR) {
+      return response;
+    }
 
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
 
@@ -327,7 +394,9 @@ export class AuthService {
     } catch (error) {
       // The caller still gets the generic answer. Fix delivery from the logs.
       this.log.error(
-        `Could not deliver reset code to user ${user.id}: ${(error as Error).message}`,
+        `Could not deliver reset code to user ${user.id}: ${
+          (error as Error).message
+        }`,
       );
     }
 
@@ -358,7 +427,12 @@ export class AuthService {
       throw new BadRequestException(INVALID_CODE);
     }
 
-    if (!this.hashesMatch(otp.codeHash, this.otpHash(user.id, purpose, dto.code))) {
+    if (
+      !this.hashesMatch(
+        otp.codeHash,
+        this.otpHash(user.id, purpose, dto.code),
+      )
+    ) {
       await this.prisma.otpCode.update({
         where: { id: otp.id },
         data: { attempts: { increment: 1 } },
@@ -386,14 +460,18 @@ export class AuthService {
       });
 
       // Sign out every device.
-      await tx.refreshToken.deleteMany({ where: { userId: user.id } });
+      await tx.refreshToken.deleteMany({
+        where: { userId: user.id },
+      });
     });
 
     return { ok: true };
   }
 
   async changePassword(userId: string, dto: ChangePasswordDto) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+    });
 
     if (!user || !user.isActive) {
       throw new UnauthorizedException('Invalid credentials');
@@ -412,12 +490,20 @@ export class AuthService {
     const passwordHash = await bcrypt.hash(dto.newPassword, 10);
 
     await this.prisma.$transaction([
-      this.prisma.user.update({ where: { id: userId }, data: { passwordHash } }),
-      this.prisma.refreshToken.deleteMany({ where: { userId } }),
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { passwordHash },
+      }),
+      this.prisma.refreshToken.deleteMany({
+        where: { userId },
+      }),
     ]);
 
     // Other devices are signed out. This device gets fresh tokens.
-    return { ok: true, ...(await this.issueTokens(userId)) };
+    return {
+      ok: true,
+      ...(await this.issueTokens(userId)),
+    };
   }
 
   // ---------- housekeeping ----------
@@ -433,7 +519,11 @@ export class AuthService {
       });
 
       const codes = await this.prisma.otpCode.deleteMany({
-        where: { expiresAt: { lt: new Date(now.getTime() - 24 * 60 * 60 * 1000) } },
+        where: {
+          expiresAt: {
+            lt: new Date(now.getTime() - 24 * 60 * 60 * 1000),
+          },
+        },
       });
 
       this.log.log(

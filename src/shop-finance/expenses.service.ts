@@ -56,7 +56,11 @@ export class ExpensesService {
     return date;
   }
 
-  async create(user: AuthUser, organizationId: string, dto: CreateExpenseDto) {
+  async create(
+    user: AuthUser,
+    organizationId: string,
+    dto: CreateExpenseDto,
+  ) {
     await this.permissions.assert(user, organizationId, 'expense.manage');
 
     const amount = money(dto.amount);
@@ -89,7 +93,11 @@ export class ExpensesService {
   async list(
     user: AuthUser,
     organizationId: string,
-    filters: { category?: ExpenseCategory; from?: string; to?: string },
+    filters: {
+      category?: ExpenseCategory;
+      from?: string;
+      to?: string;
+    },
   ) {
     await this.permissions.assert(user, organizationId, 'expense.manage');
 
@@ -102,7 +110,9 @@ export class ExpensesService {
               ...(filters.from
                 ? { gte: parseDate(filters.from, 'from') }
                 : {}),
-              ...(filters.to ? { lt: parseDate(filters.to, 'to') } : {}),
+              ...(filters.to
+                ? { lt: parseDate(filters.to, 'to') }
+                : {}),
             },
           }
         : {}),
@@ -111,11 +121,23 @@ export class ExpensesService {
     const [records, total] = await Promise.all([
       this.prisma.expense.findMany({
         where,
-        include: { recordedBy: { select: { id: true, fullName: true } } },
+        include: {
+          recordedBy: {
+            select: {
+              id: true,
+              firstName: true,
+              otherNames: true,
+              lastName: true,
+            },
+          },
+        },
         orderBy: { incurredAt: 'desc' },
         take: 200,
       }),
-      this.prisma.expense.aggregate({ where, _sum: { amount: true } }),
+      this.prisma.expense.aggregate({
+        where,
+        _sum: { amount: true },
+      }),
     ]);
 
     return {
@@ -125,7 +147,9 @@ export class ExpensesService {
   }
 
   private async load(id: string) {
-    const expense = await this.prisma.expense.findUnique({ where: { id } });
+    const expense = await this.prisma.expense.findUnique({
+      where: { id },
+    });
 
     if (!expense) {
       throw new NotFoundException('Expense not found.');
@@ -137,19 +161,29 @@ export class ExpensesService {
   async update(user: AuthUser, id: string, dto: UpdateExpenseDto) {
     const expense = await this.load(id);
 
-    await this.permissions.assert(user, expense.organizationId, 'expense.manage');
+    await this.permissions.assert(
+      user,
+      expense.organizationId,
+      'expense.manage',
+    );
 
     const data: Prisma.ExpenseUpdateInput = {};
     const changes: Record<string, { from: string; to: string }> = {};
 
     if (dto.category !== undefined && dto.category !== expense.category) {
       data.category = dto.category;
-      changes.category = { from: expense.category, to: dto.category };
+      changes.category = {
+        from: expense.category,
+        to: dto.category,
+      };
     }
 
     if (dto.description !== undefined) {
       data.description = dto.description.trim();
-      changes.description = { from: expense.description, to: data.description };
+      changes.description = {
+        from: expense.description,
+        to: data.description,
+      };
     }
 
     if (dto.amount !== undefined) {
@@ -165,7 +199,10 @@ export class ExpensesService {
     }
 
     if (dto.incurredAt !== undefined) {
-      data.incurredAt = this.checkDate(parseDate(dto.incurredAt, 'incurredAt'));
+      data.incurredAt = this.checkDate(
+        parseDate(dto.incurredAt, 'incurredAt'),
+      );
+
       changes.incurredAt = {
         from: expense.incurredAt.toISOString(),
         to: data.incurredAt.toISOString(),
@@ -177,12 +214,20 @@ export class ExpensesService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.expense.update({ where: { id }, data });
+      const updated = await tx.expense.update({
+        where: { id },
+        data,
+      });
 
       if (Object.keys(changes).length > 0) {
-        await this.audit(tx, user, expense.organizationId, 'UPDATE', id, {
-          changes,
-        });
+        await this.audit(
+          tx,
+          user,
+          expense.organizationId,
+          'UPDATE',
+          id,
+          { changes },
+        );
       }
 
       return updated;
@@ -193,31 +238,54 @@ export class ExpensesService {
   async remove(user: AuthUser, id: string) {
     const expense = await this.load(id);
 
-    await this.permissions.assert(user, expense.organizationId, 'finance.view');
+    await this.permissions.assert(
+      user,
+      expense.organizationId,
+      'finance.view',
+    );
 
     await this.prisma.$transaction(async (tx) => {
       await tx.expense.delete({ where: { id } });
 
-      await this.audit(tx, user, expense.organizationId, 'DELETE', id, {
-        amount: expense.amount.toFixed(2),
-        category: expense.category,
-        description: expense.description,
-      });
+      await this.audit(
+        tx,
+        user,
+        expense.organizationId,
+        'DELETE',
+        id,
+        {
+          amount: expense.amount.toFixed(2),
+          category: expense.category,
+          description: expense.description,
+        },
+      );
     });
 
     if (expense.receiptPublicId) {
-      await this.cloudinary.deleteAsset(expense.receiptPublicId).catch(() => {
-        this.log.error(`Could not delete receipt ${expense.receiptPublicId}`);
-      });
+      await this.cloudinary
+        .deleteAsset(expense.receiptPublicId)
+        .catch(() => {
+          this.log.error(
+            `Could not delete receipt ${expense.receiptPublicId}`,
+          );
+        });
     }
 
     return { ok: true };
   }
 
-  async attachReceipt(user: AuthUser, id: string, file: Express.Multer.File) {
+  async attachReceipt(
+    user: AuthUser,
+    id: string,
+    file: Express.Multer.File,
+  ) {
     const expense = await this.load(id);
 
-    await this.permissions.assert(user, expense.organizationId, 'expense.manage');
+    await this.permissions.assert(
+      user,
+      expense.organizationId,
+      'expense.manage',
+    );
 
     const uploaded = await this.cloudinary.uploadImage(
       file,
@@ -229,7 +297,10 @@ export class ExpensesService {
     try {
       updated = await this.prisma.expense.update({
         where: { id },
-        data: { receiptUrl: uploaded.url, receiptPublicId: uploaded.publicId },
+        data: {
+          receiptUrl: uploaded.url,
+          receiptPublicId: uploaded.publicId,
+        },
       });
     } catch (error) {
       await this.cloudinary.deleteAsset(uploaded.publicId).catch(() => {
@@ -239,11 +310,15 @@ export class ExpensesService {
       throw error;
     }
 
-    // Replace: remove the previous receipt only after the new one is saved.
+    // Remove the previous receipt only after the new one is saved.
     if (expense.receiptPublicId) {
-      await this.cloudinary.deleteAsset(expense.receiptPublicId).catch(() => {
-        this.log.error(`Could not delete old receipt ${expense.receiptPublicId}`);
-      });
+      await this.cloudinary
+        .deleteAsset(expense.receiptPublicId)
+        .catch(() => {
+          this.log.error(
+            `Could not delete old receipt ${expense.receiptPublicId}`,
+          );
+        });
     }
 
     return updated;

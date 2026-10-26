@@ -4,14 +4,14 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
-} from '@nestjs/common';
-import { GivingType, Prisma } from '@prisma/client';
+} from "@nestjs/common";
+import { GivingType, Prisma } from "@prisma/client";
 
-import { PrismaService } from '../../prisma/prisma.service';
-import { PermissionsService } from '../../common/permissions/permissions.service';
-import { AuthUser } from '../../common/decorators/current-user.decorator';
-import { ChurchAccessService } from '../church-access.service';
-import { CreatePledgeDto, RecordGivingDto } from './church.dto';
+import { PrismaService } from "../../prisma/prisma.service";
+import { PermissionsService } from "../../common/permissions/permissions.service";
+import { AuthUser } from "../../common/decorators/current-user.decorator";
+import { ChurchAccessService } from "../church-access.service";
+import { CreatePledgeDto, RecordGivingDto } from "./church.dto";
 
 type Tx = Prisma.TransactionClient;
 
@@ -48,11 +48,11 @@ export class ChurchGivingService {
     });
 
     if (!pledge) {
-      throw new NotFoundException('Pledge not found for this member.');
+      throw new NotFoundException("Pledge not found for this member.");
     }
 
-    if (pledge.status === 'CANCELLED' || pledge.status === 'FULFILLED') {
-      throw new BadRequestException('This pledge is already closed.');
+    if (pledge.status === "CANCELLED" || pledge.status === "FULFILLED") {
+      throw new BadRequestException("This pledge is already closed.");
     }
 
     const paid = pledge.amountPaid.add(amount);
@@ -61,7 +61,7 @@ export class ChurchGivingService {
       where: { id: pledge.id },
       data: {
         amountPaid: paid,
-        status: paid.gte(pledge.targetAmount) ? 'FULFILLED' : 'PARTIALLY_PAID',
+        status: paid.gte(pledge.targetAmount) ? "FULFILLED" : "PARTIALLY_PAID",
       },
     });
   }
@@ -71,7 +71,7 @@ export class ChurchGivingService {
   /** For cash, cheques and transfers an admin records by hand. */
   async record(user: AuthUser, organizationId: string, dto: RecordGivingDto) {
     await this.access.assertWorship(organizationId);
-    await this.permissions.assert(user, organizationId, 'giving.manage');
+    await this.permissions.assert(user, organizationId, "giving.manage");
 
     const amount = money(dto.amount);
     let churchMemberId: string | null = null;
@@ -79,7 +79,7 @@ export class ChurchGivingService {
     if (dto.userId) {
       if (!(await this.access.isApprovedMember(dto.userId, organizationId))) {
         throw new BadRequestException(
-          'That person is not an approved member of this organization.',
+          "That person is not an approved member of this organization.",
         );
       }
 
@@ -89,15 +89,15 @@ export class ChurchGivingService {
     }
 
     if (dto.pledgeId && !churchMemberId) {
-      throw new BadRequestException('A pledge payment must name the member.');
+      throw new BadRequestException("A pledge payment must name the member.");
     }
 
     const receivedAt = dto.receivedAt
-      ? this.parseDate(dto.receivedAt, 'receivedAt')
+      ? this.parseDate(dto.receivedAt, "receivedAt")
       : new Date();
 
     if (receivedAt.getTime() > Date.now() + 24 * 60 * 60 * 1000) {
-      throw new BadRequestException('receivedAt cannot be in the future.');
+      throw new BadRequestException("receivedAt cannot be in the future.");
     }
 
     try {
@@ -130,10 +130,10 @@ export class ChurchGivingService {
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
+        error.code === "P2002"
       ) {
         throw new ConflictException(
-          'A giving record with this reference already exists.',
+          "A giving record with this reference already exists.",
         );
       }
 
@@ -153,13 +153,13 @@ export class ChurchGivingService {
     });
 
     if (!member) {
-      return { total: '0.00', records: [] };
+      return { total: "0.00", records: [] };
     }
 
     const [records, total] = await Promise.all([
       this.prisma.givingRecord.findMany({
         where: { organizationId, churchMemberId: member.id },
-        orderBy: { receivedAt: 'desc' },
+        orderBy: { receivedAt: "desc" },
         take: 100,
       }),
       this.prisma.givingRecord.aggregate({
@@ -180,7 +180,7 @@ export class ChurchGivingService {
     organizationId: string,
     filters: { from?: string; to?: string; type?: GivingType },
   ) {
-    await this.permissions.assert(user, organizationId, 'giving.manage');
+    await this.permissions.assert(user, organizationId, "giving.manage");
 
     const records = await this.prisma.givingRecord.findMany({
       where: {
@@ -190,19 +190,28 @@ export class ChurchGivingService {
           ? {
               receivedAt: {
                 ...(filters.from
-                  ? { gte: this.parseDate(filters.from, 'from') }
+                  ? { gte: this.parseDate(filters.from, "from") }
                   : {}),
-                ...(filters.to ? { lt: this.parseDate(filters.to, 'to') } : {}),
+                ...(filters.to ? { lt: this.parseDate(filters.to, "to") } : {}),
               },
             }
           : {}),
       },
       include: {
         churchMember: {
-          select: { user: { select: { id: true, fullName: true } } },
+          select: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                otherNames: true,
+                lastName: true,
+              },
+            },
+          },
         },
       },
-      orderBy: { receivedAt: 'desc' },
+      orderBy: { receivedAt: "desc" },
       take: 200,
     });
 
@@ -219,13 +228,13 @@ export class ChurchGivingService {
     from?: string,
     to?: string,
   ) {
-    await this.permissions.assert(user, organizationId, 'giving.manage');
+    await this.permissions.assert(user, organizationId, "giving.manage");
 
     const end = to
-      ? this.parseDate(to, 'to')
+      ? this.parseDate(to, "to")
       : new Date(Date.now() + 24 * 60 * 60 * 1000);
     const start = from
-      ? this.parseDate(from, 'from')
+      ? this.parseDate(from, "from")
       : new Date(end.getFullYear() - 1, end.getMonth(), 1);
 
     const where = {
@@ -235,7 +244,7 @@ export class ChurchGivingService {
 
     const [byType, overall, byMonth] = await Promise.all([
       this.prisma.givingRecord.groupBy({
-        by: ['type'],
+        by: ["type"],
         where,
         _sum: { amount: true },
         _count: true,
@@ -273,19 +282,23 @@ export class ChurchGivingService {
 
   // ---------- pledges ----------
 
-  async createPledge(user: AuthUser, organizationId: string, dto: CreatePledgeDto) {
+  async createPledge(
+    user: AuthUser,
+    organizationId: string,
+    dto: CreatePledgeDto,
+  ) {
     await this.access.assertWorship(organizationId);
 
     const forSomeoneElse = !!dto.userId && dto.userId !== user.id;
     const targetUserId = forSomeoneElse ? dto.userId! : user.id;
 
     if (forSomeoneElse) {
-      await this.permissions.assert(user, organizationId, 'giving.manage');
+      await this.permissions.assert(user, organizationId, "giving.manage");
     }
 
     if (!(await this.access.isApprovedMember(targetUserId, organizationId))) {
       throw new BadRequestException(
-        'Only approved members of this organization can make a pledge.',
+        "Only approved members of this organization can make a pledge.",
       );
     }
 
@@ -297,7 +310,7 @@ export class ChurchGivingService {
         churchMemberId: member.id,
         title: dto.title.trim(),
         targetAmount: money(dto.targetAmount),
-        dueAt: dto.dueAt ? this.parseDate(dto.dueAt, 'dueAt') : undefined,
+        dueAt: dto.dueAt ? this.parseDate(dto.dueAt, "dueAt") : undefined,
       },
     });
   }
@@ -307,22 +320,31 @@ export class ChurchGivingService {
 
     return this.prisma.pledge.findMany({
       where: { organizationId, churchMember: { userId: user.id } },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
       take: 100,
     });
   }
 
   async listPledges(user: AuthUser, organizationId: string) {
-    await this.permissions.assert(user, organizationId, 'giving.manage');
+    await this.permissions.assert(user, organizationId, "giving.manage");
 
     return this.prisma.pledge.findMany({
       where: { organizationId },
       include: {
         churchMember: {
-          select: { user: { select: { id: true, fullName: true } } },
+          select: {
+            user: {
+              select: {
+                id: true,
+                firstName: true,
+                otherNames: true,
+                lastName: true,
+              },
+            },
+          },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
       take: 200,
     });
   }
@@ -334,25 +356,29 @@ export class ChurchGivingService {
     });
 
     if (!pledge) {
-      throw new NotFoundException('Pledge not found.');
+      throw new NotFoundException("Pledge not found.");
     }
 
     const isOwner = pledge.churchMember?.userId === user.id;
 
     if (
       !isOwner &&
-      !(await this.permissions.can(user, pledge.organizationId, 'giving.manage'))
+      !(await this.permissions.can(
+        user,
+        pledge.organizationId,
+        "giving.manage",
+      ))
     ) {
-      throw new ForbiddenException('You do not have permission to do this');
+      throw new ForbiddenException("You do not have permission to do this");
     }
 
-    if (pledge.status !== 'OPEN' && pledge.status !== 'PARTIALLY_PAID') {
-      throw new BadRequestException('This pledge is already closed.');
+    if (pledge.status !== "OPEN" && pledge.status !== "PARTIALLY_PAID") {
+      throw new BadRequestException("This pledge is already closed.");
     }
 
     return this.prisma.pledge.update({
       where: { id },
-      data: { status: 'CANCELLED' },
+      data: { status: "CANCELLED" },
     });
   }
 }

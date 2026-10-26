@@ -1,5 +1,5 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
-import { ChatPrivacy, MembershipStatus } from '@prisma/client';
+import { ChatPrivacy, MembershipStatus, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { tryNormalizePhone } from '../common/utils/phone';
@@ -9,10 +9,10 @@ export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Search for users by name or phone number (any common format).
+   * Search for users by first name, other names, last name, or phone number.
    * Excludes the current user, inactive accounts, users who accept messages
-   * only from administrators, and anyone who has blocked, or been blocked
-   * by, the searcher.
+   * only from administrators, and anyone involved in a block relationship
+   * with the searcher.
    */
   async search(userId: string, q?: string) {
     const term = q?.trim();
@@ -23,6 +23,12 @@ export class UsersService {
 
     const phone = tryNormalizePhone(term);
 
+    const nameConditions: Prisma.UserWhereInput[] = [
+      { firstName: { contains: term, mode: 'insensitive' } },
+      { lastName: { contains: term, mode: 'insensitive' } },
+      { otherNames: { contains: term, mode: 'insensitive' } },
+    ];
+
     return this.prisma.user.findMany({
       where: {
         id: { not: userId },
@@ -30,17 +36,20 @@ export class UsersService {
         chatPrivacy: { not: ChatPrivacy.ADMINS_ONLY },
         blocksMade: { none: { blockedId: userId } },
         blocksGot: { none: { blockerId: userId } },
-        OR: [
-          { fullName: { contains: term, mode: 'insensitive' } },
-          ...(phone ? [{ phone }] : []),
-        ],
+        OR: [...nameConditions, ...(phone ? [{ phone }] : [])],
       },
       select: {
         id: true,
-        fullName: true,
+        firstName: true,
+        otherNames: true,
+        lastName: true,
         avatarUrl: true,
       },
-      orderBy: { fullName: 'asc' },
+      orderBy: [
+        { lastName: 'asc' },
+        { firstName: 'asc' },
+        { otherNames: 'asc' },
+      ],
       take: 20,
     });
   }
@@ -75,16 +84,28 @@ export class UsersService {
         role: true,
         title: true,
         user: {
-          select: { id: true, fullName: true, avatarUrl: true },
+          select: {
+            id: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
+            avatarUrl: true,
+          },
         },
       },
-      orderBy: { user: { fullName: 'asc' } },
+      orderBy: [
+        { user: { lastName: 'asc' } },
+        { user: { firstName: 'asc' } },
+        { user: { otherNames: 'asc' } },
+      ],
       take: 500,
     });
 
     return rows.map((membership) => ({
       id: membership.user.id,
-      fullName: membership.user.fullName,
+      firstName: membership.user.firstName,
+      otherNames: membership.user.otherNames,
+      lastName: membership.user.lastName,
       avatarUrl: membership.user.avatarUrl,
       unit: membership.unit,
       role: membership.role,
