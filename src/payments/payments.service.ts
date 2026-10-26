@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { PaymentMethod, Prisma } from '@prisma/client';
+import { GivingType, Payment, PaymentMethod, Prisma } from '@prisma/client';
 import { randomBytes } from 'crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
@@ -15,6 +15,7 @@ import { OrdersService } from '../orders/orders.service';
 import { WalletService } from '../wallet/wallet.service';
 import { PermissionsService } from '../common/permissions/permissions.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
+import { GiveOnlineDto } from '../church/dto/church.dto';
 
 const CHANNEL_TO_METHOD: Record<string, PaymentMethod> = {
   card: 'CARD',
@@ -182,6 +183,174 @@ export class PaymentsService {
     }
   }
 
+  /** Start a card payment for giving: tithe, offering, donation or a pledge payment. */
+  async initializeGiving(
+    user: AuthUser,
+    organizationId: string,
+    dto: GiveOnlineDto,
+  ) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: { type: true, isActive: true },
+    });
+
+    if (!org?.isActive || (org.type !== 'CHURCH' && org.type !== 'MOSQUE')) {
+      throw new BadRequestException(
+        'Online giving is only available for churches and mosques.',
+      );
+    }
+
+    const membership = await this.prisma.membership.findUnique({
+      where: {
+        userId_organizationId: { userId: user.id, organizationId },
+      },
+      select: { status: true },
+    });
+
+    if (membership?.status !== 'APPROVED') {
+      throw new ForbiddenException('Only approved members can give online.');
+    }
+
+    if (dto.pledgeId) {
+      const pledge = await this.prisma.pledge.findFirst({
+        where: {
+          id: dto.pledgeId,
+          organizationId,
+          churchMember: { userId: user.id },
+          status: { in: ['OPEN', 'PARTIALLY_PAID'] },
+        },
+        select: { id: true },
+      });
+
+      if (!pledge) {
+        throw new BadRequestException('Pledge not found or already closed.');
+      }
+    }
+
+    const payer = await this.prisma.user.findUniqueOrThrow({
+      where: { id: user.id },
+    });
+
+    const decimal = new Prisma.Decimal(dto.amount.toFixed(2));
+    const reference = `GIVE-${randomBytes(6).toString('hex')}`;
+
+    const payment = await this.prisma.payment.create({
+      data: {
+        organizationId,
+        payerId: user.id,
+        amount: decimal,
+        method: 'CARD',
+        status: 'PENDING',
+        provider: 'paystack',
+        providerRef: reference,
+        purpose: 'GIVING',
+        metadata: {
+          type: dto.pledgeId ? 'PLEDGE' : (dto.type ?? 'DONATION'),
+          isAnonymous: !!dto.isAnonymous,
+          pledgeId: dto.pledgeId ?? null,
+        },
+      },
+    });
+
+    try {
+      const data = await this.paystack<{
+        authorization_url: string;
+        access_code: string;
+        reference: string;
+      }>('/transaction/initialize', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: payer.email ?? `user-${payer.id}@pay.neighborhood.app`,
+          amount: decimal.mul(100).toFixed(0), // kobo
+          currency: payment.currency,
+          reference,
+          callback_url: this.config.get('PAYSTACK_CALLBACK_URL') || undefined,
+          metadata: { purpose: 'giving', organizationId },
+        }),
+      });
+
+      return {
+        reference,
+        authorizationUrl: data.authorization_url,
+        accessCode: data.access_code,
+      };
+    } catch (e) {
+      await this.prisma.payment.update({
+        where: { id: payment.id },
+        data: { status: 'FAILED' },
+      });
+      throw e;
+    }
+  }
+
+  /** Runs inside the settle transaction once Paystack confirms a gift. */
+  private async recordOnlineGiving(
+    tx: Prisma.TransactionClient,
+    payment: Payment,
+  ) {
+    if (!payment.organizationId || !payment.payerId) {
+      throw new Error(`Giving payment ${payment.id} is missing its organization or payer`);
+    }
+
+    const meta = (payment.metadata ?? {}) as {
+      type?: GivingType;
+      isAnonymous?: boolean;
+      pledgeId?: string | null;
+    };
+
+    const member = await tx.churchMember.upsert({
+      where: {
+        userId_organizationId: {
+          userId: payment.payerId,
+          organizationId: payment.organizationId,
+        },
+      },
+      create: {
+        userId: payment.payerId,
+        organizationId: payment.organizationId,
+        joinedAt: new Date(),
+      },
+      update: {},
+    });
+
+    await tx.givingRecord.create({
+      data: {
+        organizationId: payment.organizationId,
+        churchMemberId: member.id,
+        type: meta.pledgeId ? 'PLEDGE' : (meta.type ?? 'DONATION'),
+        amount: payment.amount,
+        currency: payment.currency,
+        // Unique, so a repeated settle can never record the gift twice.
+        reference: `paystack:${payment.id}`,
+        isAnonymous: !!meta.isAnonymous,
+        notes: 'Online giving',
+      },
+    });
+
+    if (meta.pledgeId) {
+      const pledge = await tx.pledge.findFirst({
+        where: {
+          id: meta.pledgeId,
+          organizationId: payment.organizationId,
+          churchMemberId: member.id,
+          status: { in: ['OPEN', 'PARTIALLY_PAID'] },
+        },
+      });
+
+      if (pledge) {
+        const paid = pledge.amountPaid.add(payment.amount);
+
+        await tx.pledge.update({
+          where: { id: pledge.id },
+          data: {
+            amountPaid: paid,
+            status: paid.gte(pledge.targetAmount) ? 'FULFILLED' : 'PARTIALLY_PAID',
+          },
+        });
+      }
+    }
+  }
+
   /** Verifies with Paystack and settles. Safe to call many times (webhook + app callback). */
   async settle(reference: string) {
     const payment = await this.prisma.payment.findUnique({
@@ -247,6 +416,8 @@ export class PaymentsService {
           'Wallet top-up',
           `topup:${payment.id}`,
         );
+      } else if (payment.purpose === 'GIVING') {
+        await this.recordOnlineGiving(tx, payment);
       } else if (payment.orderId) {
         const r = await this.orders.confirmOrderTx(tx, payment.orderId);
         if (!r.confirmed) late = String(r.reason);

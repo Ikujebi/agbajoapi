@@ -21,8 +21,7 @@ import { OrgHoursModule } from './org-hours/org-hours.module';
 import { NoticesModule } from './notice/notices.module';
 import { SosModule } from './sos/sos.module';
 import { NotificationsModule } from './notifications/notifications.module';
-
-// New modules
+import {ChurchModule} from './church/church.module';
 import { WalletModule } from './wallet/wallet.module';
 import { SmsCampaignsModule } from './sms-campaigns/sms-campaigns.module';
 import { OtpModule } from './otp/otp.module';
@@ -58,8 +57,7 @@ import { OtpModule } from './otp/otp.module';
     NoticesModule,
     SosModule,
     NotificationsModule,
-
-    // Register new modules
+    ChurchModule,
     WalletModule,
     SmsCampaignsModule,
     OtpModule,
