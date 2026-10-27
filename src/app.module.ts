@@ -4,6 +4,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
+import { EstateUnitsModule } from './estate-units/estate-units.module';
 
 import { PrismaModule } from './prisma/prisma.module';
 import { MailModule } from './mail/mail.module';
@@ -61,6 +62,7 @@ import { OtpModule } from './otp/otp.module';
     WalletModule,
     SmsCampaignsModule,
     OtpModule,
+    EstateUnitsModule,
   ],
   providers: [
     {

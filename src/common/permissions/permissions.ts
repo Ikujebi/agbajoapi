@@ -15,6 +15,7 @@ export const PERMISSIONS = [
   'visitor.verify',
   'gate.view',
   'sos.respond',
+  'unit.manage',
   // shops: catalogue and stock
   'product.view',
   'product.create',
@@ -54,6 +55,7 @@ const ESTATE: RoleMap = {
     'gate.view',
     'sos.respond',
     'event.manage',
+    'unit.manage',
   ],
   SECURITY: ['visitor.verify', 'gate.view', 'sos.respond'],
   MEMBER: ['visitor.create'],

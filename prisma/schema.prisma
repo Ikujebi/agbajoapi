@@ -576,6 +576,11 @@ model EstateUnit {
   organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   owner        User?           @relation("UnitOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   occupancies  UnitOccupancy[]
+  latitude     Decimal?        @db.Decimal(10, 7)
+  longitude    Decimal?        @db.Decimal(10, 7)
+  directions   String? // "Green gate, third house after the water tank"
+  routeGeoJson Json? // optional LineString from the gate to the door
+  passes       VisitorPass[]
 
   @@unique([organizationId, unitNumber])
   @@index([ownerId])
@@ -615,12 +620,17 @@ model VisitorPass {
   createdAt      DateTime   @default(now())
   revokedAt      DateTime?
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  host         User         @relation("PassHost", fields: [hostId], references: [id])
-  createdBy    User?        @relation("PassCreator", fields: [createdById], references: [id], onDelete: SetNull)
-  logs         GateLog[]
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  host              User         @relation("PassHost", fields: [hostId], references: [id])
+  createdBy         User?        @relation("PassCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  logs              GateLog[]
+  destinationUnitId String?
+  shareDirections   Boolean      @default(false)
+
+  destinationUnit EstateUnit? @relation(fields: [destinationUnitId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, status, validUntil])
+  @@index([destinationUnitId])
   @@index([hostId])
 }
 
@@ -734,17 +744,17 @@ model Order {
 }
 
 model OrderItem {
-  id          String  @id @default(uuid())
+  id          String   @id @default(uuid())
   orderId     String
   productId   String?
   productName String
   sku         String?
   quantity    Int
-  unitPrice   Decimal @db.Decimal(12, 2)
-  lineTotal   Decimal @db.Decimal(12, 2)
-
-  order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  unitPrice   Decimal  @db.Decimal(12, 2)
+  lineTotal   Decimal  @db.Decimal(12, 2)
+  unitCost    Decimal? @db.Decimal(12, 2)
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product     Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
   @@index([orderId])
   @@index([productId])

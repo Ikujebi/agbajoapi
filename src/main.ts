@@ -1,13 +1,18 @@
-
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const config = app.get(ConfigService);
+
+  // Trust the first proxy (Render, Railway, Nginx, ...) so rate limiting sees
+  // each visitor's real IP instead of the proxy's. Remove this line if the
+  // API is exposed directly with no proxy in front of it.
+  app.set('trust proxy', 1);
 
   // Add HTTP security headers.
   app.use(helmet());
