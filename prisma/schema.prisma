@@ -12,7 +12,13 @@ enum WalletTxType {
   SMS_REFUND
   ADJUSTMENT
 }
-
+enum EmailCampaignStatus {
+  PENDING
+  SENDING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
 enum SmsCampaignStatus {
   SENDING
   COMPLETED
@@ -1158,21 +1164,32 @@ model Ticket {
 }
 
 model EmailCampaign {
-  id             String    @id @default(uuid())
-  organizationId String
-  senderId       String
-  subject        String
-  body           String
-  recipientCount Int       @default(0)
-  sentAt         DateTime?
-  createdAt      DateTime  @default(now())
+  id                    String              @id @default(uuid())
+  organizationId        String
+  senderId              String
+  subject               String
+  body                  String
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  sender       User         @relation("CampaignSender", fields: [senderId], references: [id])
+  // Number of eligible members at the time of the broadcast.
+  recipientCount        Int                 @default(0)
+
+  // Number of emails accepted by the email provider.
+  acceptedCount         Int                 @default(0)
+
+  // Number of emails the application failed to submit successfully.
+  failedCount           Int                 @default(0)
+
+  status                EmailCampaignStatus @default(PENDING)
+  sentAt                DateTime?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  organization          Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sender                User                @relation("CampaignSender", fields: [senderId], references: [id])
 
   @@index([organizationId, createdAt])
+  @@index([organizationId, status])
 }
-
 model ChurchMember {
   id             String    @id @default(uuid())
   userId         String
