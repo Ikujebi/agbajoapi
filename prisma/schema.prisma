@@ -625,7 +625,8 @@ model VisitorPass {
   status         PassStatus @default(ACTIVE)
   createdAt      DateTime   @default(now())
   revokedAt      DateTime?
-
+  smsSentAt      DateTime?
+  
   organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   host              User         @relation("PassHost", fields: [hostId], references: [id])
   createdBy         User?        @relation("PassCreator", fields: [createdById], references: [id], onDelete: SetNull)
