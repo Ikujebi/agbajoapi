@@ -26,7 +26,11 @@ import {ChurchModule} from './church/church.module';
 import { WalletModule } from './wallet/wallet.module';
 import { SmsCampaignsModule } from './sms-campaigns/sms-campaigns.module';
 import { OtpModule } from './otp/otp.module';
-
+import { ReportsModule } from './reports/reports.module';
+import { EventsModule } from './events/events.module';
+import { MarketplaceModule } from './marketplace/marketplace.module';
+import { ModerationModule } from './reports/moderation.module';
+import {NeighborhoodsModule} from './neighborhoods/neighborhoods.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -63,6 +67,11 @@ import { OtpModule } from './otp/otp.module';
     SmsCampaignsModule,
     OtpModule,
     EstateUnitsModule,
+    ReportsModule,
+    EventsModule,
+    MarketplaceModule,
+    ModerationModule,
+    NeighborhoodsModule,
   ],
   providers: [
     {

@@ -1,3 +1,4 @@
+
 import {
   BadRequestException,
   ConflictException,
@@ -30,15 +31,19 @@ import {
 } from './dto';
 import { NotificationsService } from '../notifications/notifications.service';
 
+import { MailService } from '../mail/mail.service';
+import { MailTemplatesService } from '../mail/mail-templates.service';
+
+import {
+  newOrderNotificationTemplate,
+  orderConfirmationTemplate,
+  orderReceiptTemplate,
+  orderStatusTemplate,
+  paymentConfirmationTemplate,
+} from '../mail/templates';
+
 type Tx = Prisma.TransactionClient;
 
-/**
- * Stock invariant:
- * - Creating an order reserves stock (reservedQty += quantity).
- * - PENDING -> CONFIRMED commits stock (quantity -= quantity, reservedQty -= quantity).
- * - PENDING -> CANCELLED releases the reservation.
- * - CONFIRMED or later -> CANCELLED returns stock.
- */
 const NEXT: Record<OrderStatus, OrderStatus[]> = {
   PENDING: ['CONFIRMED', 'CANCELLED'],
   CONFIRMED: ['PROCESSING', 'CANCELLED'],
@@ -59,6 +64,17 @@ const CUSTOMER_TEXT: Partial<Record<OrderStatus, string>> = {
   CANCELLED: 'was cancelled',
 };
 
+const STATUS_LABELS: Partial<Record<OrderStatus, string>> = {
+  PENDING: 'Pending',
+  CONFIRMED: 'Confirmed',
+  PROCESSING: 'Being prepared',
+  READY_FOR_PICKUP: 'Ready for pickup',
+  OUT_FOR_DELIVERY: 'Out for delivery',
+  DELIVERED: 'Delivered',
+  CANCELLED: 'Cancelled',
+  REFUNDED: 'Refunded',
+};
+
 const UNPAID_EXPIRY_MS = 30 * 60 * 1000;
 
 @Injectable()
@@ -72,6 +88,8 @@ export class OrdersService {
     private readonly permissions: PermissionsService,
     private readonly hours: OrgHoursService,
     private readonly notifications: NotificationsService,
+    private readonly mail: MailService,
+    private readonly mailTemplates: MailTemplatesService,
   ) {}
 
   // ---------- helpers ----------
@@ -108,6 +126,27 @@ export class OrdersService {
     return rows.map((row) => row.userId);
   }
 
+  /** Retrieves email addresses for approved order-management staff. */
+  private async getOrderStaff(organizationId: string) {
+    return this.prisma.membership.findMany({
+      where: {
+        organizationId,
+        status: 'APPROVED',
+        role: { in: rolesWith('SHOP', 'order.manage') },
+      },
+      select: {
+        user: {
+          select: {
+            email: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
+          },
+        },
+      },
+    });
+  }
+
   private async notify(
     userIds: string[],
     type: NotificationType,
@@ -139,6 +178,388 @@ export class OrdersService {
     return [user.firstName, user.otherNames, user.lastName]
       .filter((name) => name?.trim())
       .join(' ');
+  }
+
+  private formatMoney(value: Prisma.Decimal | number | string) {
+    return new Intl.NumberFormat('en-NG', {
+      style: 'currency',
+      currency: 'NGN',
+      minimumFractionDigits: 2,
+    }).format(Number(value));
+  }
+
+  private formatDate(value: Date) {
+    return new Intl.DateTimeFormat('en-NG', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(value);
+  }
+
+  /**
+   * Sends an email without allowing an email-provider failure
+   * to interrupt the main order operation.
+   */
+  private async sendEmailSafely(
+    recipient: string | null | undefined,
+    subject: string,
+    html: string,
+  ) {
+    if (!recipient?.trim()) return;
+
+    try {
+      const sent = await this.mail.send(recipient, subject, html);
+
+      if (!sent) {
+        this.log.warn(
+          `Email provider did not accept "${subject}" for ${recipient}`,
+        );
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown email error';
+
+      this.log.error(
+        `Failed to send "${subject}" to ${recipient}: ${message}`,
+      );
+    }
+  }
+
+  private async getCustomer(userId: string) {
+    return this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        otherNames: true,
+        lastName: true,
+        phone: true,
+      },
+    });
+  }
+
+  private getOrderUrl(orderId: string) {
+    const baseUrl = this.config
+      .get<string>('APP_URL')
+      ?.replace(/\/+$/, '');
+
+    return baseUrl ? `${baseUrl}/orders/${orderId}` : undefined;
+  }
+
+  // ---------- email helpers ----------
+
+  /** Sends a new-order notification to shop staff. */
+  private async emailNewOrder(
+    order: {
+      id: string;
+      orderNumber: string;
+      customerName: string;
+      customerPhone: string | null;
+      deliveryAddress: string | null;
+      deliveryNotes: string | null;
+      subtotal: Prisma.Decimal;
+      deliveryFee: Prisma.Decimal;
+      totalAmount: Prisma.Decimal;
+      items: {
+        productName: string;
+        quantity: number;
+        unitPrice: Prisma.Decimal;
+        lineTotal: Prisma.Decimal;
+      }[];
+    },
+    organizationId: string,
+    shopName: string,
+    customerEmail?: string | null,
+  ) {
+    try {
+      const staff = await this.getOrderStaff(organizationId);
+
+      if (staff.length === 0) return;
+
+      const html = this.mailTemplates.render(
+        newOrderNotificationTemplate,
+        {
+          customerName: order.customerName,
+          customerEmail: customerEmail ?? undefined,
+          customerPhone: order.customerPhone ?? undefined,
+          shopName,
+          orderNumber: order.orderNumber,
+          items: order.items.map((item) => ({
+            name: item.productName,
+            quantity: item.quantity,
+            unitPrice: this.formatMoney(item.unitPrice),
+            total: this.formatMoney(item.lineTotal),
+          })),
+          subtotal: this.formatMoney(order.subtotal),
+          deliveryFee: this.formatMoney(order.deliveryFee),
+          total: this.formatMoney(order.totalAmount),
+          fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
+          deliveryAddress: order.deliveryAddress ?? undefined,
+          customerNote: order.deliveryNotes ?? undefined,
+          orderUrl: this.getOrderUrl(order.id),
+        },
+      );
+
+      const subject = `New order ${order.orderNumber} · ${shopName}`;
+
+      for (const member of staff) {
+        await this.sendEmailSafely(
+          member.user.email,
+          subject,
+          this.mailTemplates.render(newOrderNotificationTemplate, {
+            recipientName: this.formatUserName(member.user),
+            customerName: order.customerName,
+            customerEmail: customerEmail ?? undefined,
+            customerPhone: order.customerPhone ?? undefined,
+            shopName,
+            orderNumber: order.orderNumber,
+            items: order.items.map((item) => ({
+              name: item.productName,
+              quantity: item.quantity,
+              unitPrice: this.formatMoney(item.unitPrice),
+              total: this.formatMoney(item.lineTotal),
+            })),
+            subtotal: this.formatMoney(order.subtotal),
+            deliveryFee: this.formatMoney(order.deliveryFee),
+            total: this.formatMoney(order.totalAmount),
+            fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
+            deliveryAddress: order.deliveryAddress ?? undefined,
+            customerNote: order.deliveryNotes ?? undefined,
+            orderUrl: this.getOrderUrl(order.id),
+          }),
+        );
+      }
+
+      void html;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown email error';
+
+      this.log.error(`New-order email preparation failed: ${message}`);
+    }
+  }
+
+  /** Sends an order confirmation to the customer. */
+  private async emailOrderConfirmation(orderId: string) {
+    try {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        include: {
+          items: true,
+          organization: {
+            select: { name: true },
+          },
+        },
+      });
+
+      if (!order) return;
+
+      const customer = await this.getCustomer(order.customerId);
+
+      if (!customer?.email) return;
+
+      const html = this.mailTemplates.render(
+        orderConfirmationTemplate,
+        {
+          recipientName: this.formatUserName(customer),
+          shopName: order.organization.name,
+          orderNumber: order.orderNumber,
+          items: order.items.map((item) => ({
+            name: item.productName,
+            quantity: item.quantity,
+          })),
+          total: this.formatMoney(order.totalAmount),
+          fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
+          orderUrl: this.getOrderUrl(order.id),
+        },
+      );
+
+      await this.sendEmailSafely(
+        customer.email,
+        `Order ${order.orderNumber} received`,
+        html,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown email error';
+
+      this.log.error(`Order confirmation email failed: ${message}`);
+    }
+  }
+
+  /** Sends an order status update to the customer. */
+  private async emailOrderStatus(
+    orderId: string,
+    status: string,
+    statusLabel: string,
+    message: string,
+    nextStep?: string,
+  ) {
+    try {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        include: {
+          organization: {
+            select: { name: true },
+          },
+        },
+      });
+
+      if (!order) return;
+
+      const customer = await this.getCustomer(order.customerId);
+
+      if (!customer?.email) return;
+
+      const html = this.mailTemplates.render(orderStatusTemplate, {
+        recipientName: this.formatUserName(customer),
+        shopName: order.organization.name,
+        orderNumber: order.orderNumber,
+        status,
+        statusLabel,
+        message,
+        updatedAt: this.formatDate(new Date()),
+        nextStep,
+        orderUrl: this.getOrderUrl(order.id),
+      });
+
+      await this.sendEmailSafely(
+        customer.email,
+        `Order ${order.orderNumber}: ${statusLabel}`,
+        html,
+      );
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown email error';
+
+      this.log.error(`Order status email failed: ${errorMessage}`);
+    }
+  }
+
+  /** Sends a receipt to the customer. */
+  private async emailOrderReceipt(
+    orderId: string,
+    paymentReference?: string,
+  ) {
+    try {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        include: {
+          items: true,
+          payments: true,
+          organization: {
+            select: { name: true },
+          },
+        },
+      });
+
+      if (!order) return;
+
+      const customer = await this.getCustomer(order.customerId);
+
+      if (!customer?.email) return;
+
+      const successfulPayment = order.payments.find(
+        (payment) => payment.status === 'SUCCEEDED',
+      );
+
+      const paymentMethod = successfulPayment?.method
+        ? String(successfulPayment.method)
+        : undefined;
+
+      const html = this.mailTemplates.render(orderReceiptTemplate, {
+        recipientName: this.formatUserName(customer),
+        shopName: order.organization.name,
+        orderNumber: order.orderNumber,
+        receiptReference: paymentReference ?? order.orderNumber,
+        issuedAt: this.formatDate(new Date()),
+        items: order.items.map((item) => ({
+          name: item.productName,
+          quantity: item.quantity,
+          unitPrice: this.formatMoney(item.unitPrice),
+          lineTotal: this.formatMoney(item.lineTotal),
+        })),
+        subtotal: this.formatMoney(order.subtotal),
+        deliveryFee: this.formatMoney(order.deliveryFee),
+        total: this.formatMoney(order.totalAmount),
+        paymentMethod,
+        paymentStatus: successfulPayment ? 'Paid' : 'Payment pending',
+        fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
+        deliveryAddress: order.deliveryAddress ?? undefined,
+        orderUrl: this.getOrderUrl(order.id),
+      });
+
+      await this.sendEmailSafely(
+        customer.email,
+        `Receipt for order ${order.orderNumber}`,
+        html,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown email error';
+
+      this.log.error(`Order receipt email failed: ${message}`);
+    }
+  }
+
+  /** Sends a successful payment confirmation to the customer. */
+  private async emailPaymentConfirmation(
+    orderId: string,
+    paymentReference?: string,
+  ) {
+    try {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        include: {
+          payments: true,
+          organization: {
+            select: { name: true },
+          },
+        },
+      });
+
+      if (!order) return;
+
+      const customer = await this.getCustomer(order.customerId);
+
+      if (!customer?.email) return;
+
+      const successfulPayment = order.payments.find(
+        (payment) => payment.status === 'SUCCEEDED',
+      );
+
+      const html = this.mailTemplates.render(
+        paymentConfirmationTemplate,
+        {
+          recipientName: this.formatUserName(customer),
+          shopName: order.organization.name,
+          orderNumber: order.orderNumber,
+          paymentReference: paymentReference ?? order.orderNumber,
+          amountPaid: this.formatMoney(
+            successfulPayment?.amount ?? order.totalAmount,
+          ),
+          currency: 'NGN',
+          paymentMethod: successfulPayment?.method
+            ? String(successfulPayment.method)
+            : undefined,
+          paidAt: successfulPayment?.paidAt
+            ? this.formatDate(successfulPayment.paidAt)
+            : this.formatDate(new Date()),
+          orderUrl: this.getOrderUrl(order.id),
+        },
+      );
+
+      await this.sendEmailSafely(
+        customer.email,
+        `Payment confirmed for order ${order.orderNumber}`,
+        html,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown email error';
+
+      this.log.error(`Payment confirmation email failed: ${message}`);
+    }
   }
 
   // ---------- stock ----------
@@ -282,6 +703,9 @@ export class OrdersService {
       `Order ${order.orderNumber} (₦${order.totalAmount.toFixed(2)}) has been paid.`,
       { orderId },
     );
+
+    await this.emailPaymentConfirmation(orderId);
+    await this.emailOrderReceipt(orderId);
   }
 
   // ---------- create ----------
@@ -309,6 +733,7 @@ export class OrdersService {
       where: { id: userId },
       select: {
         id: true,
+        email: true,
         firstName: true,
         otherNames: true,
         lastName: true,
@@ -344,7 +769,6 @@ export class OrdersService {
       delivery ? Number(this.config.get('DELIVERY_FEE')) || 0 : 0,
     );
 
-    // Reserve stock in stable product-ID order.
     const lines = products
       .map((product) => {
         const quantity = quantityByProductId.get(product.id)!;
@@ -371,7 +795,6 @@ export class OrdersService {
 
     const order = await this.prisma.$transaction(async (tx) => {
       for (const line of lines) {
-        // Atomic check-and-reserve prevents overselling.
         const affectedRows = await tx.$executeRaw`
           UPDATE "Product"
           SET "reservedQty" = "reservedQty" + ${line.quantity}::int
@@ -451,6 +874,26 @@ export class OrdersService {
       }`,
       { orderId: order.id },
     );
+
+    await this.emailNewOrder(
+      {
+        id: order.id,
+        orderNumber: order.orderNumber,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        deliveryAddress: order.deliveryAddress,
+        deliveryNotes: order.deliveryNotes,
+        subtotal: order.subtotal,
+        deliveryFee: order.deliveryFee,
+        totalAmount: order.totalAmount,
+        items: order.items,
+      },
+      org.id,
+      org.name,
+      user.email,
+    );
+
+    await this.emailOrderConfirmation(order.id);
 
     return order;
   }
@@ -685,15 +1128,31 @@ export class OrdersService {
         { orderId },
       );
     } else {
+      const message = `Your order ${order.orderNumber} ${
+        CUSTOMER_TEXT[to] ?? to.toLowerCase()
+      }.${refundRequired ? ' Your refund will be processed by the shop.' : ''}`;
+
       await this.notify(
         [order.customerId],
         'ORDER',
         'Order update',
-        `Your order ${order.orderNumber} ${
-          CUSTOMER_TEXT[to] ?? to.toLowerCase()
-        }.${refundRequired ? ' Your refund will be processed by the shop.' : ''}`,
+        message,
         { orderId },
       );
+
+      await this.emailOrderStatus(
+        orderId,
+        to,
+        STATUS_LABELS[to] ?? to,
+        message,
+        to === 'CONFIRMED'
+          ? 'The shop will begin processing your order.'
+          : undefined,
+      );
+    }
+
+    if (to === 'DELIVERED') {
+      await this.emailOrderReceipt(orderId);
     }
 
     return {
@@ -760,6 +1219,14 @@ export class OrdersService {
       'Rider assigned',
       `A rider has been assigned to order ${order.orderNumber}.`,
       { orderId },
+    );
+
+    await this.emailOrderStatus(
+      orderId,
+      'RIDER_ASSIGNED',
+      'Rider assigned',
+      `A rider has been assigned to your order ${order.orderNumber}.`,
+      'Your rider will contact you regarding delivery.',
     );
 
     return updated;
@@ -847,15 +1314,33 @@ export class OrdersService {
       );
     }
 
+    const deliveryMessage = `Order ${delivery.order.orderNumber}: ${dto.status
+      .replace('_', ' ')
+      .toLowerCase()}.`;
+
     await this.notify(
       [delivery.order.customerId],
       'DELIVERY',
       'Delivery update',
-      `Order ${delivery.order.orderNumber}: ${dto.status
-        .replace('_', ' ')
-        .toLowerCase()}.`,
+      deliveryMessage,
       { orderId: delivery.orderId },
     );
+
+    await this.emailOrderStatus(
+      delivery.orderId,
+      dto.status,
+      dto.status.replace('_', ' '),
+      deliveryMessage,
+      dto.status === 'IN_TRANSIT'
+        ? 'Your order is on its way.'
+        : dto.status === 'FAILED'
+          ? 'Please contact the shop for assistance.'
+          : undefined,
+    );
+
+    if (dto.status === 'DELIVERED') {
+      await this.emailOrderReceipt(delivery.orderId);
+    }
 
     return updated;
   }
@@ -918,12 +1403,22 @@ export class OrdersService {
         });
 
         if (done) {
+          const message = `Order ${order.orderNumber} was cancelled because it wasn't paid in time.`;
+
           await this.notify(
             [order.customerId],
             'ORDER',
             'Order expired',
-            `Order ${order.orderNumber} was cancelled because it wasn't paid in time.`,
+            message,
             { orderId: order.id },
+          );
+
+          await this.emailOrderStatus(
+            order.id,
+            'CANCELLED',
+            'Expired',
+            message,
+            'You can place a new order whenever you are ready.',
           );
         }
       } catch (error) {

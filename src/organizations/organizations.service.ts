@@ -1,3 +1,4 @@
+
 import {
   BadRequestException,
   ConflictException,
@@ -7,6 +8,7 @@ import {
 } from "@nestjs/common";
 
 import {
+  EmailCampaignStatus,
   MembershipRole,
   MembershipStatus,
   OrgType,
@@ -15,6 +17,7 @@ import {
 
 import { PrismaService } from "../prisma/prisma.service";
 import { MailService } from "../mail/mail.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import { PermissionsService } from "../common/permissions/permissions.service";
 import {
   TOP_ROLE,
@@ -22,6 +25,7 @@ import {
   rolesWith,
 } from "../common/permissions/permissions";
 import { AuthUser } from "../common/decorators/current-user.decorator";
+import { normalizePhone } from "../common/utils/phone";
 import {
   AddMemberDto,
   BroadcastEmailDto,
@@ -49,7 +53,44 @@ export class OrganizationsService {
     private readonly prisma: PrismaService,
     private readonly mail: MailService,
     private readonly permissions: PermissionsService,
+    private readonly notifications: NotificationsService,
   ) {}
+
+  /**
+   * Safely sends an email without allowing email failures
+   * to interrupt the main organization operation.
+   */
+  private async sendEmailSafely(
+    to: string | null | undefined,
+    subject: string,
+    html: string,
+  ): Promise<void> {
+    if (!to?.trim()) return;
+
+    try {
+      await this.mail.send(to.trim(), subject, html);
+    } catch {
+      // Email failures must not undo successful operations.
+    }
+  }
+
+  /**
+   * Builds a user's display name.
+   */
+  private formatUserName(user: {
+    firstName?: string | null;
+    otherNames?: string | null;
+    lastName?: string | null;
+  }): string {
+    return [
+      user.firstName,
+      user.otherNames,
+      user.lastName,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+  }
 
   /**
    * Legacy role check. Kept so older callers still compile.
@@ -180,6 +221,9 @@ export class OrganizationsService {
     });
   }
 
+  /**
+   * Submit a request to join an organization.
+   */
   async join(userId: string, orgId: string, dto: JoinOrgDto) {
     const organization = await this.getOrThrow(orgId);
 
@@ -213,12 +257,10 @@ export class OrganizationsService {
           organizationId: orgId,
           unit: dto.unit,
           status: MembershipStatus.PENDING,
-          // Residents are MEMBERs; the unit field records where they live.
           role: MembershipRole.MEMBER,
         },
       });
     } catch (error: unknown) {
-      // Another request may have created the membership concurrently.
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === "P2002"
@@ -231,41 +273,106 @@ export class OrganizationsService {
       throw error;
     }
 
-    // Notify everyone who is allowed to approve requests.
+    // Notify everyone allowed to approve membership requests.
     const approvers = await this.prisma.membership.findMany({
       where: {
         organizationId: orgId,
         status: MembershipStatus.APPROVED,
-        role: { in: rolesWith(organization.type, "members.manage") },
+        role: {
+          in: rolesWith(organization.type, "members.manage"),
+        },
       },
       select: { userId: true },
     });
 
-    if (approvers.length > 0) {
-      await this.prisma.notification.createMany({
-        data: approvers.map((approver) => ({
-          userId: approver.userId,
-          title: "New join request",
-          body: `A new user has requested to join ${organization.name}.`,
-        })),
+    const approverIds = approvers.map((approver) => approver.userId);
+
+    if (approverIds.length > 0) {
+      await this.notifications.send(approverIds, {
+        title: "New join request",
+        body: `A new user has requested to join ${organization.name}.`,
+        data: {
+          organizationId: orgId,
+          membershipId: membership.id,
+        },
       });
+    }
+
+    // Confirm receipt of the request to the applicant.
+    const applicant = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        firstName: true,
+        otherNames: true,
+        lastName: true,
+        email: true,
+      },
+    });
+
+    if (applicant?.email) {
+      const name = this.formatUserName(applicant);
+      const greeting = name
+        ? `Hello ${escapeHtml(name)},`
+        : "Hello,";
+
+      const html = `
+        <div>
+          <p>${greeting}</p>
+          <p>
+            Your request to join
+            <strong>${escapeHtml(organization.name)}</strong>
+            has been received.
+          </p>
+          <p>
+            An organization administrator will review your request.
+            You will be notified when your membership status changes.
+          </p>
+          <p>Thank you.</p>
+          <p>The AdugboHub Team</p>
+        </div>
+      `;
+
+      await this.sendEmailSafely(
+        applicant.email,
+        `Join request received - ${organization.name}`,
+        html,
+      );
     }
 
     return membership;
   }
 
   /**
-   * Directly add a user by phone number (shop attendants, estate security, ...).
+   * Directly add a user by phone number
+   * (shop attendants, estate security, etc.).
    */
   async addMember(user: AuthUser, orgId: string, dto: AddMemberDto) {
     const organization = await this.getOrThrow(orgId);
-    const actor = await this.permissions.assert(user, orgId, "members.manage");
 
-    this.assertCanAssign(organization.type, actor?.role ?? null, dto.role);
+    const actor = await this.permissions.assert(
+      user,
+      orgId,
+      "members.manage",
+    );
+
+    this.assertCanAssign(
+      organization.type,
+      actor?.role ?? null,
+      dto.role,
+    );
 
     const target = await this.prisma.user.findUnique({
-      where: { phone: dto.phone },
-      select: { id: true, isActive: true },
+      where: {
+        phone: normalizePhone(dto.phone),
+      },
+      select: {
+        id: true,
+        isActive: true,
+        firstName: true,
+        otherNames: true,
+        lastName: true,
+        email: true,
+      },
     });
 
     if (!target || !target.isActive) {
@@ -274,8 +381,10 @@ export class OrganizationsService {
       );
     }
 
+    let membership;
+
     try {
-      const membership = await this.prisma.membership.create({
+      membership = await this.prisma.membership.create({
         data: {
           userId: target.id,
           organizationId: orgId,
@@ -285,18 +394,6 @@ export class OrganizationsService {
           joinedAt: new Date(),
         },
       });
-
-      await this.prisma.notification.create({
-        data: {
-          userId: target.id,
-          title: "Added to an organization",
-          body: `You were added to ${organization.name} as ${dto.role
-            .toLowerCase()
-            .replace(/_/g, " ")}.`,
-        },
-      });
-
-      return membership;
     } catch (error: unknown) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -309,9 +406,61 @@ export class OrganizationsService {
 
       throw error;
     }
+
+    const roleLabel = dto.role
+      .toLowerCase()
+      .replace(/_/g, " ");
+
+    const notificationBody =
+      `You were added to ${organization.name} as ${roleLabel}.`;
+
+    await this.notifications.send([target.id], {
+      title: "Added to an organization",
+      body: notificationBody,
+      data: {
+        organizationId: orgId,
+        membershipId: membership.id,
+      },
+    });
+
+    if (target.email) {
+      const name = this.formatUserName(target);
+      const greeting = name
+        ? `Hello ${escapeHtml(name)},`
+        : "Hello,";
+
+      const html = `
+        <div>
+          <p>${greeting}</p>
+          <p>
+            You have been added to
+            <strong>${escapeHtml(organization.name)}</strong>
+            as <strong>${escapeHtml(roleLabel)}</strong>.
+          </p>
+          <p>
+            You can now access the organization according to
+            your assigned membership permissions.
+          </p>
+          <p>Welcome aboard!</p>
+          <p>The AdugboHub Team</p>
+        </div>
+      `;
+
+      await this.sendEmailSafely(
+        target.email,
+        `You've been added to ${organization.name}`,
+        html,
+      );
+    }
+
+    return membership;
   }
 
-  async listMembers(user: AuthUser, orgId: string, status?: MembershipStatus) {
+  async listMembers(
+    user: AuthUser,
+    orgId: string,
+    status?: MembershipStatus,
+  ) {
     await this.permissions.assert(user, orgId, "members.view");
 
     return this.prisma.membership.findMany({
@@ -335,6 +484,9 @@ export class OrganizationsService {
     });
   }
 
+  /**
+   * Approve, reject or otherwise review a membership request.
+   */
   async review(
     user: AuthUser,
     orgId: string,
@@ -342,7 +494,12 @@ export class OrganizationsService {
     dto: ReviewMembershipDto,
   ) {
     const organization = await this.getOrThrow(orgId);
-    const actor = await this.permissions.assert(user, orgId, "members.manage");
+
+    const actor = await this.permissions.assert(
+      user,
+      orgId,
+      "members.manage",
+    );
 
     const membership = await this.prisma.membership.findFirst({
       where: {
@@ -375,14 +532,14 @@ export class OrganizationsService {
     if (
       membership.userId === user.id &&
       (dto.status !== MembershipStatus.APPROVED ||
-        (dto.role !== undefined && dto.role !== membership.role))
+        (dto.role !== undefined &&
+          dto.role !== membership.role))
     ) {
       throw new BadRequestException(
         "You cannot demote yourself or change your own membership role through this endpoint.",
       );
     }
 
-    // Runs even for status-only changes, so a manager cannot suspend the owner.
     this.assertCanAssign(
       organization.type,
       actor?.role ?? null,
@@ -394,8 +551,11 @@ export class OrganizationsService {
       where: { id: membership.id },
       data: {
         status: dto.status,
-        ...(dto.role !== undefined ? { role: dto.role } : {}),
-        ...(dto.status === MembershipStatus.APPROVED && !membership.joinedAt
+        ...(dto.role !== undefined
+          ? { role: dto.role }
+          : {}),
+        ...(dto.status === MembershipStatus.APPROVED &&
+        !membership.joinedAt
           ? { joinedAt: new Date() }
           : {}),
       },
@@ -405,27 +565,71 @@ export class OrganizationsService {
       `Your membership of ${membership.organization.name} is now ` +
       `${dto.status.toLowerCase()}.`;
 
-    await this.prisma.notification.create({
+    await this.notifications.send([membership.userId], {
+      title: "Membership update",
+      body,
       data: {
-        userId: membership.userId,
-        title: "Membership update",
-        body,
+        organizationId: orgId,
+        membershipId: membership.id,
       },
     });
 
-    if (membership.user.email) {
-      const safeBody = escapeHtml(body);
+    const name = this.formatUserName(membership.user);
+    const greeting = name
+      ? `Hello ${escapeHtml(name)},`
+      : "Hello,";
 
-      // Don't let a mail provider failure undo the membership update.
-      void this.mail
-        .send(membership.user.email, "Membership update", `<p>${safeBody}</p>`)
-        .catch(() => undefined);
-    }
+    const html = `
+      <div>
+        <p>${greeting}</p>
+        <p>
+          Your membership of
+          <strong>${escapeHtml(membership.organization.name)}</strong>
+          is now
+          <strong>${escapeHtml(dto.status.toLowerCase())}</strong>.
+        </p>
+        ${
+          dto.status === MembershipStatus.APPROVED
+            ? `
+              <p>
+                Your membership has been approved. You can now
+                access the organization according to your assigned role.
+              </p>
+            `
+            : dto.status === MembershipStatus.REJECTED
+              ? `
+                <p>
+                  Your membership request was not approved.
+                  Please contact the organization administrators
+                  if you need further clarification.
+                </p>
+              `
+              : ""
+        }
+        <p>The AdugboHub Team</p>
+      </div>
+    `;
+
+    await this.sendEmailSafely(
+      membership.user.email,
+      "Membership update",
+      html,
+    );
 
     return updated;
   }
 
-  async broadcastEmail(user: AuthUser, orgId: string, dto: BroadcastEmailDto) {
+  /**
+   * Emails every approved member who has an address.
+   *
+   * The campaign row is created first, so its id can be used
+   * as the mail service's idempotency key.
+   */
+  async broadcastEmail(
+    user: AuthUser,
+    orgId: string,
+    dto: BroadcastEmailDto,
+  ) {
     await this.permissions.assert(user, orgId, "email.broadcast");
 
     const organization = await this.getOrThrow(orgId);
@@ -446,33 +650,86 @@ export class OrganizationsService {
       },
     });
 
-    const emails = members
-      .map((membership) => membership.user.email)
-      .filter((email): email is string => email !== null);
+    const recipients = [
+      ...new Set(
+        members
+          .map((membership) =>
+            membership.user.email?.trim().toLowerCase(),
+          )
+          .filter((email): email is string => !!email),
+      ),
+    ];
 
-    const safeName = escapeHtml(organization.name);
-    const safeBody = escapeHtml(dto.body).replace(/\r?\n/g, "<br/>");
-    const html = `<h3>${safeName}</h3><div>${safeBody}</div>`;
+    if (recipients.length === 0) {
+      throw new BadRequestException(
+        "No approved members have an email address to send to.",
+      );
+    }
 
-    const sent = await this.mail.sendBulk(
-      emails,
-      `[${organization.name}] ${dto.subject}`,
-      html,
-    );
-
-    await this.prisma.emailCampaign.create({
+    const campaign = await this.prisma.emailCampaign.create({
       data: {
         organizationId: orgId,
         senderId: user.id,
         subject: dto.subject,
         body: dto.body,
-        recipientCount: sent,
+        recipientCount: recipients.length,
+        status: EmailCampaignStatus.SENDING,
+      },
+    });
+
+    const safeName = escapeHtml(organization.name);
+    const safeBody = escapeHtml(dto.body).replace(
+      /\r?\n/g,
+      "<br/>",
+    );
+
+    const html = `
+      <div>
+        <h3>${safeName}</h3>
+        <div>${safeBody}</div>
+      </div>
+    `;
+
+    let accepted = 0;
+
+    try {
+      accepted = await this.mail.sendBulk(
+        recipients,
+        `[${organization.name}] ${dto.subject}`,
+        html,
+        campaign.id,
+      );
+    } catch {
+      accepted = 0;
+    }
+
+    const failed = recipients.length - accepted;
+
+    const status =
+      accepted === 0
+        ? EmailCampaignStatus.FAILED
+        : failed > 0
+          ? EmailCampaignStatus.PARTIAL
+          : EmailCampaignStatus.COMPLETED;
+
+    await this.prisma.emailCampaign.update({
+      where: { id: campaign.id },
+      data: {
+        acceptedCount: accepted,
+        failedCount: failed,
+        status,
+        sentAt: new Date(),
       },
     });
 
     return {
-      recipients: emails.length,
-      sent,
+      campaignId: campaign.id,
+      recipients: recipients.length,
+      accepted,
+      failed,
+      status,
+      // Kept so existing clients that read "sent" keep working.
+      sent: accepted,
     };
   }
 }

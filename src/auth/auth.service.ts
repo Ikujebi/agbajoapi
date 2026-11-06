@@ -1,3 +1,4 @@
+
 import {
   BadRequestException,
   ConflictException,
@@ -10,14 +11,29 @@ import { JwtService } from '@nestjs/jwt';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { OtpChannel, OtpPurpose, Prisma, User } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
-import { createHash, randomInt, randomUUID, timingSafeEqual } from 'crypto';
+import {
+  createHash,
+  randomInt,
+  randomUUID,
+  timingSafeEqual,
+} from 'crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
+import { MailTemplatesService } from '../mail/mail-templates.service';
+import { otpTemplate } from '../mail/templates';
 import { SmsService } from '../sms/sms.service';
-import { normalizePhone, tryNormalizePhone } from '../common/utils/phone';
+
+import {
+  normalizePhone,
+  tryNormalizePhone,
+} from '../common/utils/phone';
+
 import { LoginDto, RegisterDto } from './dto';
-import { ChangePasswordDto, ResetPasswordDto } from './dto/password.dto';
+import {
+  ChangePasswordDto,
+  ResetPasswordDto,
+} from './dto/password.dto';
 
 const userSelect = {
   id: true,
@@ -32,18 +48,24 @@ const userSelect = {
   createdAt: true,
 } satisfies Prisma.UserSelect;
 
-const REFRESH_TOKEN_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+const REFRESH_TOKEN_LIFETIME_MS =
+  30 * 24 * 60 * 60 * 1000;
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
 const OTP_MAX_PER_HOUR = 3;
+
 const INVALID_CODE = 'Invalid or expired code.';
 
 /**
- * Compared against when the account does not exist, so a login for an
- * unknown user takes as long as one for a real user.
+ * Compared against when the account does not exist,
+ * so a login for an unknown user takes as long as one
+ * for a real user.
  */
-const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 10);
+const DUMMY_HASH = bcrypt.hashSync(
+  'not-a-real-password',
+  10,
+);
 
 interface RefreshPayload {
   sub: string;
@@ -85,17 +107,33 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly mail: MailService,
+    private readonly mailTemplates: MailTemplatesService,
     private readonly sms: SmsService,
   ) {}
 
+  /**
+   * Hashes a token using SHA-256.
+   */
   private hash(token: string): string {
-    return createHash('sha256').update(token).digest('hex');
+    return createHash('sha256')
+      .update(token)
+      .digest('hex');
   }
 
-  private otpHash(userId: string, purpose: OtpPurpose, code: string): string {
+  /**
+   * Generates a purpose-specific OTP hash.
+   */
+  private otpHash(
+    userId: string,
+    purpose: OtpPurpose,
+    code: string,
+  ): string {
     return this.hash(`${userId}:${purpose}:${code}`);
   }
 
+  /**
+   * Compares hashes using a timing-safe comparison.
+   */
   private hashesMatch(a: string, b: string): boolean {
     const aBuffer = Buffer.from(a, 'hex');
     const bBuffer = Buffer.from(b, 'hex');
@@ -106,49 +144,81 @@ export class AuthService {
     );
   }
 
-  /** Email (contains @) or phone in any common format. */
-  private async findByIdentifier(identifier: string): Promise<User | null> {
+  /**
+   * Finds a user by email or phone number.
+   */
+  private async findByIdentifier(
+    identifier: string,
+  ): Promise<User | null> {
     const value = identifier.trim();
 
     if (value.includes('@')) {
       return this.prisma.user.findUnique({
-        where: { email: value.toLowerCase() },
+        where: {
+          email: value.toLowerCase(),
+        },
       });
     }
 
     const phone = tryNormalizePhone(value);
 
     return phone
-      ? this.prisma.user.findUnique({ where: { phone } })
+      ? this.prisma.user.findUnique({
+          where: { phone },
+        })
       : null;
   }
 
+  /**
+   * Issues access and refresh tokens.
+   */
   private async issueTokens(userId: string) {
     const accessSecret =
-      this.config.getOrThrow<string>('JWT_ACCESS_SECRET');
+      this.config.getOrThrow<string>(
+        'JWT_ACCESS_SECRET',
+      );
+
     const refreshSecret =
-      this.config.getOrThrow<string>('JWT_REFRESH_SECRET');
+      this.config.getOrThrow<string>(
+        'JWT_REFRESH_SECRET',
+      );
 
     const accessToken = await this.jwt.signAsync(
       { sub: userId },
-      { secret: accessSecret, expiresIn: '15m' },
+      {
+        secret: accessSecret,
+        expiresIn: '15m',
+      },
     );
 
     const refreshToken = await this.jwt.signAsync(
-      { sub: userId, jti: randomUUID() },
-      { secret: refreshSecret, expiresIn: '30d' },
+      {
+        sub: userId,
+        jti: randomUUID(),
+      },
+      {
+        secret: refreshSecret,
+        expiresIn: '30d',
+      },
     );
 
     await this.prisma.refreshToken.create({
       data: {
         userId,
         tokenHash: this.hash(refreshToken),
-        expiresAt: new Date(Date.now() + REFRESH_TOKEN_LIFETIME_MS),
+        expiresAt: new Date(
+          Date.now() + REFRESH_TOKEN_LIFETIME_MS,
+        ),
       },
     });
 
-    return { accessToken, refreshToken };
+    return {
+      accessToken,
+      refreshToken,
+    };
   }
+
+  // ---------- registration ----------
 
   async register(dto: RegisterDto) {
     const firstName = dto.firstName.trim();
@@ -162,17 +232,26 @@ export class AuthService {
     }
 
     const phone = normalizePhone(dto.phone);
-    const email = dto.email?.trim().toLowerCase() || undefined;
+
+    const email =
+      dto.email?.trim().toLowerCase() || undefined;
 
     const exists = await this.prisma.user.findFirst({
       where: {
-        OR: [{ phone }, ...(email ? [{ email }] : [])],
+        OR: [
+          { phone },
+          ...(email ? [{ email }] : []),
+        ],
       },
-      select: { id: true },
+      select: {
+        id: true,
+      },
     });
 
     if (exists) {
-      throw new ConflictException('Phone or email already registered');
+      throw new ConflictException(
+        'Phone or email already registered',
+      );
     }
 
     try {
@@ -183,7 +262,10 @@ export class AuthService {
           otherNames,
           phone,
           ...(email ? { email } : {}),
-          passwordHash: await bcrypt.hash(dto.password, 10),
+          passwordHash: await bcrypt.hash(
+            dto.password,
+            10,
+          ),
         },
         select: userSelect,
       });
@@ -203,47 +285,71 @@ export class AuthService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new ConflictException('Phone or email already registered');
+        throw new ConflictException(
+          'Phone or email already registered',
+        );
       }
 
       throw error;
     }
   }
 
-  async login(dto: LoginDto) {
-    const user = await this.findByIdentifier(dto.identifier);
+  // ---------- login ----------
 
-    // Always run bcrypt, even for unknown accounts, to keep timing uniform.
+  async login(dto: LoginDto) {
+    const user = await this.findByIdentifier(
+      dto.identifier,
+    );
+
+    // Always run bcrypt, even for unknown accounts,
+    // to keep timing uniform.
     const passwordOk = await bcrypt.compare(
       dto.password,
       user?.passwordHash ?? DUMMY_HASH,
     );
 
     if (!user || !user.isActive || !passwordOk) {
-      throw new UnauthorizedException('Invalid credentials');
+      throw new UnauthorizedException(
+        'Invalid credentials',
+      );
     }
 
     const tokens = await this.issueTokens(user.id);
 
-    return { user: toPublicUser(user), ...tokens };
+    return {
+      user: toPublicUser(user),
+      ...tokens,
+    };
   }
+
+  // ---------- refresh token ----------
 
   async refresh(refreshToken: string) {
     if (
       typeof refreshToken !== 'string' ||
       refreshToken.trim().length === 0
     ) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(
+        'Invalid refresh token',
+      );
     }
 
     let payload: RefreshPayload;
 
     try {
-      payload = await this.jwt.verifyAsync<RefreshPayload>(refreshToken, {
-        secret: this.config.getOrThrow<string>('JWT_REFRESH_SECRET'),
-      });
+      payload =
+        await this.jwt.verifyAsync<RefreshPayload>(
+          refreshToken,
+          {
+            secret: this.config.getOrThrow<string>(
+              'JWT_REFRESH_SECRET',
+            ),
+          },
+        );
     } catch {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(
+        'Invalid refresh token',
+      );
     }
 
     if (
@@ -253,49 +359,70 @@ export class AuthService {
       typeof payload.jti !== 'string' ||
       !payload.jti
     ) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(
+        'Invalid refresh token',
+      );
     }
 
     const tokenHash = this.hash(refreshToken);
 
-    const stored = await this.prisma.refreshToken.findUnique({
-      where: { tokenHash },
-    });
+    const stored =
+      await this.prisma.refreshToken.findUnique({
+        where: { tokenHash },
+      });
 
     if (!stored || stored.expiresAt <= new Date()) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(
+        'Invalid refresh token',
+      );
     }
 
     if (stored.userId !== payload.sub) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(
+        'Invalid refresh token',
+      );
     }
 
     const user = await this.prisma.user.findUnique({
-      where: { id: payload.sub },
-      select: { id: true, isActive: true },
-    });
-
-    if (!user || !user.isActive) {
-      throw new UnauthorizedException('Invalid refresh token');
-    }
-
-    // Delete conditionally so concurrent refresh attempts cannot
-    // both successfully rotate the same stored token.
-    const deleted = await this.prisma.refreshToken.deleteMany({
       where: {
-        id: stored.id,
-        tokenHash,
-        userId: payload.sub,
-        expiresAt: { gt: new Date() },
+        id: payload.sub,
+      },
+      select: {
+        id: true,
+        isActive: true,
       },
     });
 
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException(
+        'Invalid refresh token',
+      );
+    }
+
+    // Delete conditionally so concurrent refresh attempts
+    // cannot both successfully rotate the same token.
+    const deleted =
+      await this.prisma.refreshToken.deleteMany({
+        where: {
+          id: stored.id,
+          tokenHash,
+          userId: payload.sub,
+          expiresAt: {
+            gt: new Date(),
+          },
+        },
+      });
+
     if (deleted.count !== 1) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException(
+        'Invalid refresh token',
+      );
     }
 
     return this.issueTokens(payload.sub);
   }
+
+  // ---------- logout ----------
 
   async logout(refreshToken: string) {
     if (
@@ -306,15 +433,21 @@ export class AuthService {
     }
 
     await this.prisma.refreshToken.deleteMany({
-      where: { tokenHash: this.hash(refreshToken) },
+      where: {
+        tokenHash: this.hash(refreshToken),
+      },
     });
 
     return { ok: true };
   }
 
+  // ---------- current user ----------
+
   async me(userId: string) {
     const user = await this.prisma.user.findUnique({
-      where: { id: userId },
+      where: {
+        id: userId,
+      },
       select: userSelect,
     });
 
@@ -331,8 +464,9 @@ export class AuthService {
   // ---------- passwords ----------
 
   /**
-   * Always answers the same way, whether or not the account exists,
-   * so the endpoint cannot be used to find out who has an account.
+   * Always answers the same way, whether or not the
+   * account exists, so the endpoint cannot be used
+   * to find out who has an account.
    */
   async forgotPassword(identifier: string) {
     const response = {
@@ -347,6 +481,7 @@ export class AuthService {
     }
 
     const purpose = OtpPurpose.PASSWORD_RESET;
+
     const channel: OtpChannel = identifier.includes('@')
       ? OtpChannel.EMAIL
       : OtpChannel.SMS;
@@ -365,46 +500,78 @@ export class AuthService {
       return response;
     }
 
-    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+    const code = String(
+      randomInt(0, 1_000_000),
+    ).padStart(6, '0');
 
     await this.prisma.otpCode.create({
       data: {
         userId: user.id,
         purpose,
         channel,
-        codeHash: this.otpHash(user.id, purpose, code),
-        expiresAt: new Date(Date.now() + OTP_TTL_MS),
+        codeHash: this.otpHash(
+          user.id,
+          purpose,
+          code,
+        ),
+        expiresAt: new Date(
+          Date.now() + OTP_TTL_MS,
+        ),
       },
     });
 
     try {
       if (channel === OtpChannel.EMAIL && user.email) {
-        await this.mail.send(
-          user.email,
-          'Reset your password',
-          `<p>Your password reset code is <b>${code}</b>.</p>` +
-            `<p>It expires in 10 minutes. If you did not ask for it, ignore this email.</p>`,
+        // Render the reusable AdugboHub OTP email template.
+        const html = this.mailTemplates.render(
+          otpTemplate,
+          {
+            recipientName: formatFullName(user),
+            code,
+            purpose: 'PASSWORD_RESET',
+            expiresIn: '10 minutes',
+          },
         );
+
+        const sent = await this.mail.send(
+          user.email,
+          'Reset your AdugboHub password',
+          html,
+        );
+
+        if (!sent) {
+          this.log.error(
+            `Could not deliver reset email to user ${user.id}.`,
+          );
+        }
       } else {
         await this.sms.send(
           user.phone,
-          `Your Neighborhood code is ${code}. It expires in 10 minutes. Never share it.`,
+          `Your AdugboHub code is ${code}. It expires in 10 minutes. Never share it.`,
         );
       }
-    } catch (error) {
-      // The caller still gets the generic answer. Fix delivery from the logs.
+    } catch (error: unknown) {
+      // Keep the generic response to prevent account enumeration.
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown delivery error';
+
       this.log.error(
-        `Could not deliver reset code to user ${user.id}: ${
-          (error as Error).message
-        }`,
+        `Could not deliver reset code to user ${user.id}: ${message}`,
       );
     }
 
     return response;
   }
 
+  /**
+   * Verifies the password-reset OTP and updates the password.
+   */
   async resetPassword(dto: ResetPasswordDto) {
-    const user = await this.findByIdentifier(dto.identifier);
+    const user = await this.findByIdentifier(
+      dto.identifier,
+    );
 
     if (!user || !user.isActive) {
       throw new BadRequestException(INVALID_CODE);
@@ -418,36 +585,61 @@ export class AuthService {
         userId: user.id,
         purpose,
         consumedAt: null,
-        expiresAt: { gt: now },
+        expiresAt: {
+          gt: now,
+        },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: {
+        createdAt: 'desc',
+      },
     });
 
-    if (!otp || otp.attempts >= OTP_MAX_ATTEMPTS) {
+    if (
+      !otp ||
+      otp.attempts >= OTP_MAX_ATTEMPTS
+    ) {
       throw new BadRequestException(INVALID_CODE);
     }
 
     if (
       !this.hashesMatch(
         otp.codeHash,
-        this.otpHash(user.id, purpose, dto.code),
+        this.otpHash(
+          user.id,
+          purpose,
+          dto.code,
+        ),
       )
     ) {
       await this.prisma.otpCode.update({
-        where: { id: otp.id },
-        data: { attempts: { increment: 1 } },
+        where: {
+          id: otp.id,
+        },
+        data: {
+          attempts: {
+            increment: 1,
+          },
+        },
       });
 
       throw new BadRequestException(INVALID_CODE);
     }
 
-    const passwordHash = await bcrypt.hash(dto.newPassword, 10);
+    const passwordHash = await bcrypt.hash(
+      dto.newPassword,
+      10,
+    );
 
     await this.prisma.$transaction(async (tx) => {
       // Claim the code so it can only be used once.
       const claimed = await tx.otpCode.updateMany({
-        where: { id: otp.id, consumedAt: null },
-        data: { consumedAt: now },
+        where: {
+          id: otp.id,
+          consumedAt: null,
+        },
+        data: {
+          consumedAt: now,
+        },
       });
 
       if (claimed.count !== 1) {
@@ -455,30 +647,53 @@ export class AuthService {
       }
 
       await tx.user.update({
-        where: { id: user.id },
-        data: { passwordHash },
+        where: {
+          id: user.id,
+        },
+        data: {
+          passwordHash,
+        },
       });
 
       // Sign out every device.
       await tx.refreshToken.deleteMany({
-        where: { userId: user.id },
+        where: {
+          userId: user.id,
+        },
       });
     });
 
     return { ok: true };
   }
 
-  async changePassword(userId: string, dto: ChangePasswordDto) {
+  /**
+   * Changes the authenticated user's password.
+   */
+  async changePassword(
+    userId: string,
+    dto: ChangePasswordDto,
+  ) {
     const user = await this.prisma.user.findUnique({
-      where: { id: userId },
+      where: {
+        id: userId,
+      },
     });
 
     if (!user || !user.isActive) {
-      throw new UnauthorizedException('Invalid credentials');
+      throw new UnauthorizedException(
+        'Invalid credentials',
+      );
     }
 
-    if (!(await bcrypt.compare(dto.currentPassword, user.passwordHash))) {
-      throw new UnauthorizedException('Current password is incorrect.');
+    if (
+      !(await bcrypt.compare(
+        dto.currentPassword,
+        user.passwordHash,
+      ))
+    ) {
+      throw new UnauthorizedException(
+        'Current password is incorrect.',
+      );
     }
 
     if (dto.currentPassword === dto.newPassword) {
@@ -487,19 +702,30 @@ export class AuthService {
       );
     }
 
-    const passwordHash = await bcrypt.hash(dto.newPassword, 10);
+    const passwordHash = await bcrypt.hash(
+      dto.newPassword,
+      10,
+    );
 
     await this.prisma.$transaction([
       this.prisma.user.update({
-        where: { id: userId },
-        data: { passwordHash },
+        where: {
+          id: userId,
+        },
+        data: {
+          passwordHash,
+        },
       }),
+
       this.prisma.refreshToken.deleteMany({
-        where: { userId },
+        where: {
+          userId,
+        },
       }),
     ]);
 
-    // Other devices are signed out. This device gets fresh tokens.
+    // Other devices are signed out.
+    // This device gets fresh tokens.
     return {
       ok: true,
       ...(await this.issueTokens(userId)),
@@ -508,20 +734,29 @@ export class AuthService {
 
   // ---------- housekeeping ----------
 
-  /** Needs ScheduleModule.forRoot() in AppModule. */
+  /**
+   * Needs ScheduleModule.forRoot() in AppModule.
+   */
   @Cron(CronExpression.EVERY_DAY_AT_3AM)
   async purgeExpired(): Promise<void> {
     try {
       const now = new Date();
 
-      const tokens = await this.prisma.refreshToken.deleteMany({
-        where: { expiresAt: { lt: now } },
-      });
+      const tokens =
+        await this.prisma.refreshToken.deleteMany({
+          where: {
+            expiresAt: {
+              lt: now,
+            },
+          },
+        });
 
       const codes = await this.prisma.otpCode.deleteMany({
         where: {
           expiresAt: {
-            lt: new Date(now.getTime() - 24 * 60 * 60 * 1000),
+            lt: new Date(
+              now.getTime() - 24 * 60 * 60 * 1000,
+            ),
           },
         },
       });
@@ -529,8 +764,13 @@ export class AuthService {
       this.log.log(
         `Purged ${tokens.count} expired refresh token(s) and ${codes.count} old code(s)`,
       );
-    } catch (error) {
-      this.log.error(`Purge failed: ${(error as Error).message}`);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown error';
+
+      this.log.error(`Purge failed: ${message}`);
     }
   }
 }

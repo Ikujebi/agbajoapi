@@ -1,3 +1,4 @@
+
 import {
   BadRequestException,
   ForbiddenException,
@@ -13,7 +14,15 @@ import { ListingStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { MailService } from '../mail/mail.service';
+import { MailTemplatesService } from '../mail/mail-templates.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
+
+import {
+  listingInquiryTemplate,
+  listingExpiredTemplate,
+} from '../mail/templates';
+
 import {
   CreateListingDto,
   ListingQueryDto,
@@ -53,18 +62,25 @@ export class ListingsService {
     private readonly prisma: PrismaService,
     private readonly cloudinary: CloudinaryService,
     private readonly notifications: NotificationsService,
+    private readonly mail: MailService,
+    private readonly mailTemplates: MailTemplatesService,
   ) {}
 
   // ---------- helpers ----------
 
-  private async assertRefs(categoryId?: string, neighborhoodId?: string) {
+  private async assertRefs(
+    categoryId?: string,
+    neighborhoodId?: string,
+  ) {
     if (categoryId) {
       const category = await this.prisma.marketplaceCategory.findUnique({
         where: { id: categoryId },
         select: { id: true },
       });
 
-      if (!category) throw new BadRequestException('Category not found.');
+      if (!category) {
+        throw new BadRequestException('Category not found.');
+      }
     }
 
     if (neighborhoodId) {
@@ -73,14 +89,19 @@ export class ListingsService {
         select: { id: true },
       });
 
-      if (!neighborhood) throw new BadRequestException('Neighborhood not found.');
+      if (!neighborhood) {
+        throw new BadRequestException('Neighborhood not found.');
+      }
     }
   }
 
   /** Stops one account from flooding the marketplace. */
   private async assertCapacity(userId: string) {
     const live = await this.prisma.marketplaceListing.count({
-      where: { sellerId: userId, status: { in: ['ACTIVE', 'RESERVED'] } },
+      where: {
+        sellerId: userId,
+        status: { in: ['ACTIVE', 'RESERVED'] },
+      },
     });
 
     if (live >= MAX_ACTIVE_PER_USER) {
@@ -116,6 +137,57 @@ export class ListingsService {
     return Boolean(block);
   }
 
+  /** Builds a person's display name. */
+  private getDisplayName(person: {
+    firstName?: string | null;
+    otherNames?: string | null;
+    lastName?: string | null;
+  }): string {
+    return [
+      person.firstName,
+      person.otherNames,
+      person.lastName,
+    ]
+      .filter((part): part is string => Boolean(part?.trim()))
+      .join(' ');
+  }
+
+  /**
+   * Sends marketplace emails without interrupting
+   * the main marketplace operation.
+   */
+  private async sendMarketplaceEmail(
+    recipient: string | null | undefined,
+    subject: string,
+    html: string,
+  ): Promise<void> {
+    if (!recipient?.trim()) {
+      return;
+    }
+
+    try {
+      const sent = await this.mail.send(
+        recipient.trim(),
+        subject,
+        html,
+      );
+
+      if (!sent) {
+        this.log.warn(
+          `Marketplace email was not accepted for ${recipient}.`,
+        );
+      }
+    } catch (error) {
+      this.log.error(
+        `Marketplace email failed: ${
+          error instanceof Error
+            ? error.message
+            : 'Unknown error'
+        }`,
+      );
+    }
+  }
+
   /** Deletes a listing's photos from the database and from Cloudinary. */
   private async cleanupImages(listingId: string) {
     const images = await this.prisma.listingImage.findMany({
@@ -123,13 +195,17 @@ export class ListingsService {
       select: { publicId: true },
     });
 
-    await this.prisma.listingImage.deleteMany({ where: { listingId } });
+    await this.prisma.listingImage.deleteMany({
+      where: { listingId },
+    });
 
     for (const image of images) {
       if (!image.publicId) continue;
 
       await this.cloudinary.deleteAsset(image.publicId).catch(() => {
-        this.log.error(`Could not delete Cloudinary asset ${image.publicId}`);
+        this.log.error(
+          `Could not delete Cloudinary asset ${image.publicId}`,
+        );
       });
     }
   }
@@ -149,7 +225,10 @@ export class ListingsService {
 
     if (!neighborhoodId) {
       const primary = await this.prisma.userNeighborhood.findFirst({
-        where: { userId: user.id, isPrimary: true },
+        where: {
+          userId: user.id,
+          isPrimary: true,
+        },
         select: { neighborhoodId: true },
       });
 
@@ -168,7 +247,10 @@ export class ListingsService {
         categoryId: dto.categoryId,
         neighborhoodId,
         status,
-        expiresAt: new Date(Date.now() + (dto.expiresInDays ?? DEFAULT_DAYS) * DAY_MS),
+        expiresAt: new Date(
+          Date.now() +
+            (dto.expiresInDays ?? DEFAULT_DAYS) * DAY_MS,
+        ),
       },
       include: { images: true },
     });
@@ -187,39 +269,83 @@ export class ListingsService {
         select: { id: true },
       });
 
-      categoryIds = [query.categoryId, ...children.map((child) => child.id)];
+      categoryIds = [
+        query.categoryId,
+        ...children.map((child) => child.id),
+      ];
     }
 
     const where: Prisma.MarketplaceListingWhereInput = {
       status: { in: ['ACTIVE', 'RESERVED'] },
+
       AND: [
-        { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+        {
+          OR: [
+            { expiresAt: null },
+            { expiresAt: { gt: new Date() } },
+          ],
+        },
+
         ...(term
           ? [
               {
                 OR: [
-                  { title: { contains: term, mode: 'insensitive' as const } },
-                  { description: { contains: term, mode: 'insensitive' as const } },
+                  {
+                    title: {
+                      contains: term,
+                      mode: 'insensitive' as const,
+                    },
+                  },
+                  {
+                    description: {
+                      contains: term,
+                      mode: 'insensitive' as const,
+                    },
+                  },
                 ],
               },
             ]
           : []),
       ],
-      // Hide sellers who are inactive or who have blocked, or been blocked by, the viewer.
+
+      // Hide inactive sellers and users who have blocked
+      // or been blocked by the viewer.
       seller: {
         isActive: true,
-        blocksMade: { none: { blockedId: user.id } },
-        blocksGot: { none: { blockerId: user.id } },
+        blocksMade: {
+          none: { blockedId: user.id },
+        },
+        blocksGot: {
+          none: { blockerId: user.id },
+        },
       },
-      ...(categoryIds ? { categoryId: { in: categoryIds } } : {}),
-      ...(query.neighborhoodId ? { neighborhoodId: query.neighborhoodId } : {}),
-      ...(query.sellerId ? { sellerId: query.sellerId } : {}),
-      ...(query.condition ? { condition: query.condition } : {}),
-      ...(query.minPrice !== undefined || query.maxPrice !== undefined
+
+      ...(categoryIds
+        ? { categoryId: { in: categoryIds } }
+        : {}),
+
+      ...(query.neighborhoodId
+        ? { neighborhoodId: query.neighborhoodId }
+        : {}),
+
+      ...(query.sellerId
+        ? { sellerId: query.sellerId }
+        : {}),
+
+      ...(query.condition
+        ? { condition: query.condition }
+        : {}),
+
+      ...(query.minPrice !== undefined ||
+      query.maxPrice !== undefined
         ? {
             price: {
-              ...(query.minPrice !== undefined ? { gte: query.minPrice } : {}),
-              ...(query.maxPrice !== undefined ? { lte: query.maxPrice } : {}),
+              ...(query.minPrice !== undefined
+                ? { gte: query.minPrice }
+                : {}),
+              ...(query.maxPrice !== undefined
+                ? { lte: query.maxPrice }
+                : {}),
             },
           }
         : {}),
@@ -236,12 +362,28 @@ export class ListingsService {
       where,
       orderBy,
       take: limit + 1,
-      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+
+      ...(query.cursor
+        ? {
+            cursor: { id: query.cursor },
+            skip: 1,
+          }
+        : {}),
+
       include: {
-        images: { orderBy: { sortOrder: 'asc' }, take: 1 },
-        seller: { select: SELLER_SELECT },
-        category: { select: { id: true, name: true } },
-        neighborhood: { select: { id: true, name: true } },
+        images: {
+          orderBy: { sortOrder: 'asc' },
+          take: 1,
+        },
+        seller: {
+          select: SELLER_SELECT,
+        },
+        category: {
+          select: { id: true, name: true },
+        },
+        neighborhood: {
+          select: { id: true, name: true },
+        },
       },
     });
 
@@ -250,7 +392,9 @@ export class ListingsService {
 
     return {
       items,
-      nextCursor: hasMore ? items[items.length - 1].id : null,
+      nextCursor: hasMore
+        ? items[items.length - 1].id
+        : null,
     };
   }
 
@@ -258,11 +402,24 @@ export class ListingsService {
     const listing = await this.prisma.marketplaceListing.findUnique({
       where: { id },
       include: {
-        images: { orderBy: { sortOrder: 'asc' } },
-        seller: { select: { ...SELLER_SELECT, isActive: true } },
-        category: { select: { id: true, name: true } },
-        neighborhood: { select: { id: true, name: true } },
-        _count: { select: { inquiries: true } },
+        images: {
+          orderBy: { sortOrder: 'asc' },
+        },
+        seller: {
+          select: {
+            ...SELLER_SELECT,
+            isActive: true,
+          },
+        },
+        category: {
+          select: { id: true, name: true },
+        },
+        neighborhood: {
+          select: { id: true, name: true },
+        },
+        _count: {
+          select: { inquiries: true },
+        },
       },
     });
 
@@ -300,17 +457,26 @@ export class ListingsService {
         avatarUrl: seller.avatarUrl,
       },
       isMine,
-      // Only the seller sees how many people have asked.
-      inquiryCount: isMine ? _count.inquiries : undefined,
+      inquiryCount: isMine
+        ? _count.inquiries
+        : undefined,
     };
   }
 
   mine(user: AuthUser) {
     return this.prisma.marketplaceListing.findMany({
-      where: { sellerId: user.id, status: { not: 'REMOVED' } },
+      where: {
+        sellerId: user.id,
+        status: { not: 'REMOVED' },
+      },
       include: {
-        images: { orderBy: { sortOrder: 'asc' }, take: 1 },
-        _count: { select: { inquiries: true } },
+        images: {
+          orderBy: { sortOrder: 'asc' },
+          take: 1,
+        },
+        _count: {
+          select: { inquiries: true },
+        },
       },
       orderBy: { createdAt: 'desc' },
       take: 100,
@@ -319,28 +485,50 @@ export class ListingsService {
 
   // ---------- change ----------
 
-  async update(user: AuthUser, id: string, dto: UpdateListingDto) {
+  async update(
+    user: AuthUser,
+    id: string,
+    dto: UpdateListingDto,
+  ) {
     const listing = await this.loadOwned(user, id);
 
-    if (listing.status === 'SOLD' || listing.status === 'REMOVED') {
-      throw new BadRequestException('A closed listing cannot be edited.');
+    if (
+      listing.status === 'SOLD' ||
+      listing.status === 'REMOVED'
+    ) {
+      throw new BadRequestException(
+        'A closed listing cannot be edited.',
+      );
     }
 
-    if (listing.status === 'EXPIRED' && dto.status !== 'REMOVED') {
-      throw new BadRequestException('Renew an expired listing to edit it.');
+    if (
+      listing.status === 'EXPIRED' &&
+      dto.status !== 'REMOVED'
+    ) {
+      throw new BadRequestException(
+        'Renew an expired listing to edit it.',
+      );
     }
 
     await this.assertRefs(dto.categoryId, dto.neighborhoodId);
 
-    const changingStatus = dto.status !== undefined && dto.status !== listing.status;
+    const changingStatus =
+      dto.status !== undefined &&
+      dto.status !== listing.status;
 
-    if (changingStatus && !ALLOWED[listing.status].includes(dto.status!)) {
+    if (
+      changingStatus &&
+      !ALLOWED[listing.status].includes(dto.status!)
+    ) {
       throw new BadRequestException(
         `A ${listing.status.toLowerCase()} listing cannot become ${dto.status!.toLowerCase()}.`,
       );
     }
 
-    const publishing = changingStatus && dto.status === 'ACTIVE' && listing.status === 'DRAFT';
+    const publishing =
+      changingStatus &&
+      dto.status === 'ACTIVE' &&
+      listing.status === 'DRAFT';
 
     if (publishing) {
       await this.assertCapacity(user.id);
@@ -349,30 +537,62 @@ export class ListingsService {
     const updated = await this.prisma.marketplaceListing.update({
       where: { id },
       data: {
-        ...(dto.title !== undefined ? { title: dto.title.trim() } : {}),
+        ...(dto.title !== undefined
+          ? { title: dto.title.trim() }
+          : {}),
+
         ...(dto.description !== undefined
           ? { description: dto.description.trim() }
           : {}),
-        ...(dto.price !== undefined ? { price: money(dto.price) } : {}),
-        ...(dto.condition !== undefined ? { condition: dto.condition } : {}),
-        ...(dto.isNegotiable !== undefined ? { isNegotiable: dto.isNegotiable } : {}),
+
+        ...(dto.price !== undefined
+          ? { price: money(dto.price) }
+          : {}),
+
+        ...(dto.condition !== undefined
+          ? { condition: dto.condition }
+          : {}),
+
+        ...(dto.isNegotiable !== undefined
+          ? { isNegotiable: dto.isNegotiable }
+          : {}),
+
         ...(dto.locationText !== undefined
           ? { locationText: dto.locationText.trim() }
           : {}),
-        ...(dto.categoryId !== undefined ? { categoryId: dto.categoryId } : {}),
+
+        ...(dto.categoryId !== undefined
+          ? { categoryId: dto.categoryId }
+          : {}),
+
         ...(dto.neighborhoodId !== undefined
           ? { neighborhoodId: dto.neighborhoodId }
           : {}),
-        ...(changingStatus ? { status: dto.status } : {}),
+
+        ...(changingStatus
+          ? { status: dto.status }
+          : {}),
+
         // A draft that is published starts a fresh listing period.
         ...(publishing
-          ? { expiresAt: new Date(Date.now() + DEFAULT_DAYS * DAY_MS) }
+          ? {
+              expiresAt: new Date(
+                Date.now() + DEFAULT_DAYS * DAY_MS,
+              ),
+            }
           : {}),
       },
-      include: { images: { orderBy: { sortOrder: 'asc' } } },
+      include: {
+        images: {
+          orderBy: { sortOrder: 'asc' },
+        },
+      },
     });
 
-    if (changingStatus && dto.status === 'REMOVED') {
+    if (
+      changingStatus &&
+      dto.status === 'REMOVED'
+    ) {
       await this.cleanupImages(id);
     }
 
@@ -383,8 +603,14 @@ export class ListingsService {
   async renew(user: AuthUser, id: string) {
     const listing = await this.loadOwned(user, id);
 
-    if (!['ACTIVE', 'RESERVED', 'EXPIRED'].includes(listing.status)) {
-      throw new BadRequestException('Only live or expired listings can be renewed.');
+    if (
+      !['ACTIVE', 'RESERVED', 'EXPIRED'].includes(
+        listing.status,
+      )
+    ) {
+      throw new BadRequestException(
+        'Only live or expired listings can be renewed.',
+      );
     }
 
     if (listing.status === 'EXPIRED') {
@@ -394,8 +620,13 @@ export class ListingsService {
     return this.prisma.marketplaceListing.update({
       where: { id },
       data: {
-        status: listing.status === 'EXPIRED' ? 'ACTIVE' : listing.status,
-        expiresAt: new Date(Date.now() + DEFAULT_DAYS * DAY_MS),
+        status:
+          listing.status === 'EXPIRED'
+            ? 'ACTIVE'
+            : listing.status,
+        expiresAt: new Date(
+          Date.now() + DEFAULT_DAYS * DAY_MS,
+        ),
       },
     });
   }
@@ -406,7 +637,10 @@ export class ListingsService {
       where: { id },
     });
 
-    if (!listing || (listing.sellerId !== user.id && !user.isSuperAdmin)) {
+    if (
+      !listing ||
+      (listing.sellerId !== user.id && !user.isSuperAdmin)
+    ) {
       throw new NotFoundException('Listing not found.');
     }
 
@@ -422,7 +656,11 @@ export class ListingsService {
 
   // ---------- inquiries ----------
 
-  async inquire(user: AuthUser, listingId: string, message: string) {
+  async inquire(
+    user: AuthUser,
+    listingId: string,
+    message: string,
+  ) {
     const listing = await this.prisma.marketplaceListing.findUnique({
       where: { id: listingId },
       select: {
@@ -431,7 +669,15 @@ export class ListingsService {
         sellerId: true,
         status: true,
         expiresAt: true,
-        seller: { select: { isActive: true } },
+        seller: {
+          select: {
+            isActive: true,
+            email: true,
+            firstName: true,
+            otherNames: true,
+            lastName: true,
+          },
+        },
       },
     });
 
@@ -439,25 +685,32 @@ export class ListingsService {
       listing &&
       ['ACTIVE', 'RESERVED'].includes(listing.status) &&
       listing.seller.isActive &&
-      (!listing.expiresAt || listing.expiresAt > new Date());
+      (!listing.expiresAt ||
+        listing.expiresAt > new Date());
 
     if (!listing || !live) {
       throw new NotFoundException('Listing not found.');
     }
 
     if (listing.sellerId === user.id) {
-      throw new BadRequestException('You cannot send an inquiry on your own listing.');
+      throw new BadRequestException(
+        'You cannot send an inquiry on your own listing.',
+      );
     }
 
     if (await this.isBlocked(user.id, listing.sellerId)) {
-      throw new ForbiddenException('You cannot contact this seller.');
+      throw new ForbiddenException(
+        'You cannot contact this seller.',
+      );
     }
 
     const recent = await this.prisma.listingInquiry.count({
       where: {
         listingId,
         userId: user.id,
-        createdAt: { gt: new Date(Date.now() - DAY_MS) },
+        createdAt: {
+          gt: new Date(Date.now() - DAY_MS),
+        },
       },
     });
 
@@ -469,15 +722,77 @@ export class ListingsService {
     }
 
     const inquiry = await this.prisma.listingInquiry.create({
-      data: { listingId, userId: user.id, message: message.trim() },
+      data: {
+        listingId,
+        userId: user.id,
+        message: message.trim(),
+      },
     });
 
-    await this.notifications.send([listing.sellerId], {
-      type: 'GENERAL',
-      title: `New inquiry: ${listing.title}`,
-      body: inquiry.message.slice(0, 120),
-      data: { listingId, inquiryId: inquiry.id, buyerId: user.id },
-    });
+    // Push notification is best-effort.
+    try {
+      await this.notifications.send(
+        [listing.sellerId],
+        {
+          type: 'GENERAL',
+          title: `New inquiry: ${listing.title}`,
+          body: inquiry.message.slice(0, 120),
+          data: {
+            listingId,
+            inquiryId: inquiry.id,
+            buyerId: user.id,
+          },
+        },
+      );
+    } catch (error) {
+      this.log.error(
+        `Inquiry notification failed: ${
+          error instanceof Error
+            ? error.message
+            : 'Unknown error'
+        }`,
+      );
+    }
+
+    // Get the buyer's display name for the email.
+    try {
+      const buyer = await this.prisma.user.findUnique({
+        where: { id: user.id },
+        select: {
+          firstName: true,
+          otherNames: true,
+          lastName: true,
+        },
+      });
+
+      const html = this.mailTemplates.render(
+        listingInquiryTemplate,
+        {
+          recipientName: this.getDisplayName(
+            listing.seller,
+          ),
+          listingTitle: listing.title,
+          buyerName: buyer
+            ? this.getDisplayName(buyer)
+            : undefined,
+          message: inquiry.message,
+        },
+      );
+
+      await this.sendMarketplaceEmail(
+        listing.seller.email,
+        `New inquiry about your listing: ${listing.title}`,
+        html,
+      );
+    } catch (error) {
+      this.log.error(
+        `Inquiry email preparation failed: ${
+          error instanceof Error
+            ? error.message
+            : 'Unknown error'
+        }`,
+      );
+    }
 
     return inquiry;
   }
@@ -487,7 +802,11 @@ export class ListingsService {
 
     return this.prisma.listingInquiry.findMany({
       where: { listingId },
-      include: { user: { select: SELLER_SELECT } },
+      include: {
+        user: {
+          select: SELLER_SELECT,
+        },
+      },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
@@ -495,7 +814,7 @@ export class ListingsService {
 
   // ---------- housekeeping ----------
 
-  /** Marks listings past their end date as EXPIRED and tells the sellers. */
+  /** Marks expired listings and notifies their sellers. */
   @Cron(CronExpression.EVERY_HOUR)
   async expireListings(): Promise<void> {
     try {
@@ -504,13 +823,27 @@ export class ListingsService {
           status: { in: ['ACTIVE', 'RESERVED'] },
           expiresAt: { lt: new Date() },
         },
-        select: { id: true, sellerId: true },
+        select: {
+          id: true,
+          title: true,
+          sellerId: true,
+          seller: {
+            select: {
+              email: true,
+              firstName: true,
+              otherNames: true,
+              lastName: true,
+            },
+          },
+        },
         take: 500,
       });
 
-      if (due.length === 0) return;
+      if (due.length === 0) {
+        return;
+      }
 
-      await this.prisma.marketplaceListing.updateMany({
+      const result = await this.prisma.marketplaceListing.updateMany({
         where: {
           id: { in: due.map((listing) => listing.id) },
           status: { in: ['ACTIVE', 'RESERVED'] },
@@ -518,21 +851,90 @@ export class ListingsService {
         data: { status: 'EXPIRED' },
       });
 
-      const perSeller = new Map<string, number>();
+      if (result.count === 0) {
+        return;
+      }
+
+      const perSeller = new Map<
+        string,
+        {
+          email: string | null;
+          name: string;
+          titles: string[];
+        }
+      >();
 
       for (const listing of due) {
-        perSeller.set(listing.sellerId, (perSeller.get(listing.sellerId) ?? 0) + 1);
+        const existing = perSeller.get(listing.sellerId);
+
+        if (existing) {
+          existing.titles.push(listing.title);
+        } else {
+          perSeller.set(listing.sellerId, {
+            email: listing.seller.email,
+            name: this.getDisplayName(listing.seller),
+            titles: [listing.title],
+          });
+        }
       }
 
-      for (const [sellerId, count] of perSeller) {
-        await this.notifications.send([sellerId], {
-          type: 'GENERAL',
-          title: 'Listings expired',
-          body: `${count} of your listing${count === 1 ? ' has' : 's have'} expired. Renew ${count === 1 ? 'it' : 'them'} to keep selling.`,
-        });
+      for (const [sellerId, seller] of perSeller) {
+        const count = seller.titles.length;
+
+        // Push notification is best-effort.
+        try {
+          await this.notifications.send(
+            [sellerId],
+            {
+              type: 'GENERAL',
+              title: 'Listings expired',
+              body: `${count} of your listing${count === 1 ? ' has' : 's have'} expired. Renew ${count === 1 ? 'it' : 'them'} to keep selling.`,
+            },
+          );
+        } catch (error) {
+          this.log.error(
+            `Listing expiry notification failed for seller ${sellerId}: ${
+              error instanceof Error
+                ? error.message
+                : 'Unknown error'
+            }`,
+          );
+        }
+
+        // Email delivery is best-effort.
+        try {
+          const html = this.mailTemplates.render(
+            listingExpiredTemplate,
+            {
+              recipientName: seller.name,
+              expiredCount: count,
+              listingTitles: seller.titles,
+            },
+          );
+
+          await this.sendMarketplaceEmail(
+            seller.email,
+            `${count} marketplace listing${count === 1 ? '' : 's'} expired`,
+            html,
+          );
+        } catch (error) {
+          this.log.error(
+            `Listing expiry email preparation failed for seller ${sellerId}: ${
+              error instanceof Error
+                ? error.message
+                : 'Unknown error'
+            }`,
+          );
+        }
       }
     } catch (error) {
-      this.log.error(`Listing expiry failed: ${(error as Error).message}`);
+      this.log.error(
+        `Listing expiry failed: ${
+          error instanceof Error
+            ? error.message
+            : 'Unknown error'
+        }`,
+      );
     }
   }
 }

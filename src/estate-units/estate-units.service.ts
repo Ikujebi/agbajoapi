@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -11,6 +12,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { OrganizationsService } from '../organizations/organizations.service';
 import { PermissionsService } from '../common/permissions/permissions.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
+import { MailService } from '../mail/mail.service';
+
 import {
   AddOccupantDto,
   CreateUnitDto,
@@ -18,6 +21,7 @@ import {
   PinUnitLocationDto,
   UpdateUnitDto,
 } from './dto';
+
 import { RouteLineString } from './dto/is-route-line-string.validator';
 
 /** Rejects pins that are obviously wrong (typos, wrong city, 0,0). */
@@ -39,9 +43,12 @@ const distanceKm = (
   const rad = (degrees: number) => (degrees * Math.PI) / 180;
   const dLat = rad(bLat - aLat);
   const dLng = rad(bLng - aLng);
+
   const h =
     Math.sin(dLat / 2) ** 2 +
-    Math.cos(rad(aLat)) * Math.cos(rad(bLat)) * Math.sin(dLng / 2) ** 2;
+    Math.cos(rad(aLat)) *
+      Math.cos(rad(bLat)) *
+      Math.sin(dLng / 2) ** 2;
 
   return 2 * EARTH_RADIUS_KM * Math.asin(Math.sqrt(h));
 };
@@ -58,6 +65,7 @@ const PERSON_SELECT = {
   otherNames: true,
   lastName: true,
   phone: true,
+  email: true,
 } satisfies Prisma.UserSelect;
 
 const unitInclude = (now: Date) =>
@@ -99,13 +107,217 @@ const sanitizeRoute = (route: RouteLineString): Prisma.InputJsonValue => ({
   ]),
 });
 
+/** Escape dynamic values before inserting them into HTML emails. */
+const escapeHtml = (value: unknown): string =>
+  String(value ?? '').replace(
+    /[&<>"']/g,
+    (character) =>
+      ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      })[character] ?? character,
+  );
+
 @Injectable()
 export class EstateUnitsService {
+  private readonly logger = new Logger(EstateUnitsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly orgs: OrganizationsService,
     private readonly permissions: PermissionsService,
+    private readonly mail: MailService,
   ) {}
+
+  /**
+   * Sends a branded unit notification.
+   *
+   * Email errors are intentionally isolated from database operations.
+   */
+  private async sendUnitEmail(
+    recipients: Array<string | null | undefined>,
+    subject: string,
+    heading: string,
+    message: string,
+    details: {
+      estateName?: string | null;
+      unitNumber?: string | null;
+      building?: string | null;
+      unitType?: string | null;
+    },
+  ): Promise<void> {
+    const emails = [
+      ...new Set(
+        recipients
+          .filter((email): email is string => Boolean(email?.trim()))
+          .map((email) => email.trim().toLowerCase()),
+      ),
+    ];
+
+    if (!emails.length) {
+      return;
+    }
+
+    const detailRows = [
+      ['Estate', details.estateName],
+      ['Unit number', details.unitNumber],
+      ['Building', details.building],
+      ['Unit type', details.unitType],
+    ]
+      .filter(([, value]) => Boolean(value))
+      .map(
+        ([label, value]) => `
+          <tr>
+            <td style="padding:10px 12px;color:#64748b;font-size:13px;border-bottom:1px solid #f1f5f9;">
+              ${escapeHtml(label)}
+            </td>
+            <td style="padding:10px 12px;color:#1e293b;font-size:13px;font-weight:600;border-bottom:1px solid #f1f5f9;">
+              ${escapeHtml(value)}
+            </td>
+          </tr>
+        `,
+      )
+      .join('');
+
+    const html = `
+      <!DOCTYPE html>
+      <html lang="en">
+        <head>
+          <meta charset="UTF-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <title>${escapeHtml(subject)}</title>
+        </head>
+
+        <body style="margin:0;padding:0;background:#f8fafc;font-family:Arial,Helvetica,sans-serif;color:#1e293b;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f8fafc;padding:32px 12px;">
+            <tr>
+              <td align="center">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:580px;background:#ffffff;border-radius:14px;overflow:hidden;">
+                  <tr>
+                    <td style="padding:26px 30px;background:#6d28d9;">
+                      <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:700;">
+                        AdugboHub
+                      </h1>
+                      <p style="margin:6px 0 0;color:#ede9fe;font-size:13px;">
+                        Your neighbourhood, better connected.
+                      </p>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:32px 30px;">
+                      <h2 style="margin:0 0 14px;color:#1e293b;font-size:21px;">
+                        ${escapeHtml(heading)}
+                      </h2>
+
+                      <p style="margin:0 0 22px;color:#475569;font-size:15px;line-height:1.7;">
+                        ${escapeHtml(message)}
+                      </p>
+
+                      ${
+                        detailRows
+                          ? `
+                            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #e2e8f0;border-radius:9px;border-collapse:separate;border-spacing:0;margin-bottom:24px;">
+                              ${detailRows}
+                            </table>
+                          `
+                          : ''
+                      }
+
+                      <p style="margin:0;color:#64748b;font-size:13px;line-height:1.6;">
+                        If you have questions about this update, please contact your estate management.
+                      </p>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:20px 30px;background:#f8fafc;border-top:1px solid #e2e8f0;">
+                      <p style="margin:0;color:#64748b;font-size:12px;line-height:1.6;">
+                        This is an automated notification from AdugboHub.
+                        Please do not reply directly to this email.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+      </html>
+    `;
+
+    await Promise.all(
+      emails.map(async (email) => {
+        try {
+          await this.mail.send(email, subject, html);
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error ? error.message : 'Unknown email error';
+
+          this.logger.error(
+            `Unable to send estate unit email to ${email}: ${message}`,
+          );
+        }
+      }),
+    );
+  }
+
+  /** Gets the email addresses of the owner and current occupants. */
+  private async getUnitNotificationEmails(
+    unitId: string,
+  ): Promise<string[]> {
+    const unit = await this.prisma.estateUnit.findUnique({
+      where: { id: unitId },
+      select: {
+        owner: {
+          select: { email: true },
+        },
+        occupancies: {
+          where: activeOccupancy(new Date()),
+          select: {
+            user: {
+              select: { email: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!unit) {
+      return [];
+    }
+
+    return [
+      unit.owner?.email,
+      ...unit.occupancies.map((occupancy) => occupancy.user.email),
+    ].filter((email): email is string => Boolean(email));
+  }
+
+  /** Gets the estate name for email notifications. */
+  private async getEstateName(organizationId: string): Promise<string> {
+    const organization = await this.orgs.getOrThrow(organizationId);
+    return organization.name;
+  }
+
+  /** Builds common unit details for email notifications. */
+  private getUnitEmailDetails(
+    unit: {
+      unitNumber: string;
+      building: string | null;
+      unitType: string | null;
+    },
+    estateName: string,
+  ) {
+    return {
+      estateName,
+      unitNumber: unit.unitNumber,
+      building: unit.building,
+      unitType: unit.unitType,
+    };
+  }
 
   /** The organization must be an estate and the user must hold unit.manage. */
   private async assertEstateManager(
@@ -146,7 +358,15 @@ export class EstateUnitsService {
   private async getUnitOrThrow(id: string) {
     const unit = await this.prisma.estateUnit.findUnique({
       where: { id },
-      select: { id: true, organizationId: true, ownerId: true, isActive: true },
+      select: {
+        id: true,
+        organizationId: true,
+        ownerId: true,
+        isActive: true,
+        unitNumber: true,
+        building: true,
+        unitType: true,
+      },
     });
 
     if (!unit) {
@@ -227,6 +447,19 @@ export class EstateUnitsService {
         },
         include: unitInclude(new Date()),
       });
+
+      // Notify the owner when a unit is assigned during creation.
+      if (unit.owner?.email) {
+        const estateName = await this.getEstateName(dto.organizationId);
+
+        await this.sendUnitEmail(
+          [unit.owner.email],
+          'A unit has been assigned to you',
+          'Your estate unit has been created',
+          `A unit has been created and assigned to you in ${estateName}.`,
+          this.getUnitEmailDetails(unit, estateName),
+        );
+      }
 
       return present(unit);
     } catch (error) {
@@ -319,6 +552,41 @@ export class EstateUnitsService {
         include: unitInclude(new Date()),
       });
 
+      const estateName = await this.getEstateName(unit.organizationId);
+
+      // Notify the newly assigned owner.
+      if (
+        dto.ownerId &&
+        dto.ownerId !== unit.ownerId &&
+        updated.owner?.email
+      ) {
+        await this.sendUnitEmail(
+          [updated.owner.email],
+          'A unit has been assigned to you',
+          'You have been assigned an estate unit',
+          `You have been assigned a unit in ${estateName}.`,
+          this.getUnitEmailDetails(updated, estateName),
+        );
+      }
+
+      // Notify the owner and current occupants when unit availability changes.
+      if (
+        dto.isActive !== undefined &&
+        dto.isActive !== unit.isActive
+      ) {
+        const recipients = await this.getUnitNotificationEmails(id);
+
+        await this.sendUnitEmail(
+          recipients,
+          dto.isActive ? 'Your estate unit is now active' : 'Your estate unit has been deactivated',
+          dto.isActive ? 'Your unit is now active' : 'Your unit has been deactivated',
+          dto.isActive
+            ? `Your unit in ${estateName} has been reactivated.`
+            : `Your unit in ${estateName} has been deactivated. Please contact estate management if you need further information.`,
+          this.getUnitEmailDetails(updated, estateName),
+        );
+      }
+
       return present(updated);
     } catch (error) {
       throw this.mapWriteError(error);
@@ -370,7 +638,10 @@ export class EstateUnitsService {
       }
     }
 
-    const data: Prisma.EstateUnitUncheckedUpdateInput = { latitude, longitude };
+    const data: Prisma.EstateUnitUncheckedUpdateInput = {
+      latitude,
+      longitude,
+    };
 
     if (dto.directions !== undefined) {
       data.directions = dto.directions || null;
@@ -431,7 +702,7 @@ export class EstateUnitsService {
 
     const now = new Date();
 
-    return this.prisma.$transaction(async (tx) => {
+    const occupancy = await this.prisma.$transaction(async (tx) => {
       const existing = await tx.unitOccupancy.findFirst({
         where: {
           estateUnitId: unit.id,
@@ -471,6 +742,21 @@ export class EstateUnitsService {
         },
       });
     });
+
+    // Notify the newly added occupant after the transaction succeeds.
+    if (occupancy.user.email) {
+      const estateName = await this.getEstateName(unit.organizationId);
+
+      await this.sendUnitEmail(
+        [occupancy.user.email],
+        'You have been added as an estate occupant',
+        'Welcome to your new unit',
+        `You have been added as an occupant of a unit in ${estateName}.`,
+        this.getUnitEmailDetails(unit, estateName),
+      );
+    }
+
+    return occupancy;
   }
 
   async endOccupancy(user: AuthUser, id: string, occupancyId: string) {
@@ -480,7 +766,11 @@ export class EstateUnitsService {
 
     const occupancy = await this.prisma.unitOccupancy.findFirst({
       where: { id: occupancyId, estateUnitId: unit.id },
-      select: { id: true, endAt: true },
+      select: {
+        id: true,
+        endAt: true,
+        user: { select: PERSON_SELECT },
+      },
     });
 
     if (!occupancy) {
@@ -493,7 +783,7 @@ export class EstateUnitsService {
       throw new BadRequestException('This occupancy has already ended.');
     }
 
-    return this.prisma.unitOccupancy.update({
+    const updated = await this.prisma.unitOccupancy.update({
       where: { id: occupancy.id },
       data: { endAt: now, isPrimary: false },
       select: {
@@ -504,5 +794,20 @@ export class EstateUnitsService {
         user: { select: PERSON_SELECT },
       },
     });
+
+    // Notify the former occupant after the update succeeds.
+    if (updated.user.email) {
+      const estateName = await this.getEstateName(unit.organizationId);
+
+      await this.sendUnitEmail(
+        [updated.user.email],
+        'Your estate occupancy has ended',
+        'Your occupancy has ended',
+        `Your occupancy of a unit in ${estateName} has been marked as ended by estate management.`,
+        this.getUnitEmailDetails(unit, estateName),
+      );
+    }
+
+    return updated;
   }
 }
