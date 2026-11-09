@@ -13,9 +13,8 @@ import { Prisma, ServiceBookingStatus } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { MailService } from '../mail/mail.service';
-import { MailTemplatesService } from '../mail/mail-templates.service';
-import { serviceBookingTemplate } from '../mail/templates';
+import { EmailOutboxService } from '../email-outbox/email-outbox.service';
+import type { QueueServiceBookingEmailInput } from '../email-outbox/email-outbox.service';
 
 import { AuthUser } from '../common/decorators/current-user.decorator';
 import { displayName } from '../common/utils/names';
@@ -67,7 +66,6 @@ const FLOW: Record<
     COMPLETED: 'artisan',
     CANCELLED: 'either',
   },
-  // Once work has started only the artisan can call it off.
   IN_PROGRESS: {
     COMPLETED: 'artisan',
     CANCELLED: 'artisan',
@@ -127,6 +125,13 @@ type BookingWithRelations = Prisma.ServiceBookingGetPayload<{
   include: typeof BOOKING_INCLUDE;
 }>;
 
+type BookingRole = 'customer' | 'artisan';
+
+type BookingEmailFactory = (
+  booking: BookingWithRelations,
+  role: BookingRole,
+) => QueueServiceBookingEmailInput;
+
 @Injectable()
 export class BookingsService {
   private readonly log = new Logger(BookingsService.name);
@@ -134,8 +139,7 @@ export class BookingsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
-    private readonly mail: MailService,
-    private readonly mailTemplates: MailTemplatesService,
+    private readonly emailOutbox: EmailOutboxService,
   ) {}
 
   // ---------- helpers ----------
@@ -200,76 +204,6 @@ export class BookingsService {
     }
 
     return booking;
-  }
-
-  /**
-   * Sends a booking email without allowing email-provider failures
-   * to interrupt the booking operation.
-   *
-   * Recipient email addresses are fetched separately and are never
-   * included in the booking API response.
-   */
-  private async sendBookingEmail(
-    recipientId: string,
-    subject: string,
-    options: {
-      title: string;
-      message: string;
-      serviceName: string;
-      bookingId: string;
-      details?: string[];
-    },
-  ): Promise<void> {
-    try {
-      const recipient = await this.prisma.user.findUnique({
-        where: {
-          id: recipientId,
-        },
-        select: {
-          email: true,
-          firstName: true,
-          otherNames: true,
-          lastName: true,
-        },
-      });
-
-      if (!recipient?.email) {
-        this.log.warn(
-          `Booking email skipped: recipient ${recipientId} has no email address.`,
-        );
-        return;
-      }
-
-      const html = this.mailTemplates.render(serviceBookingTemplate, {
-        recipientName: displayName(recipient),
-        title: options.title,
-        message: options.message,
-        serviceName: options.serviceName,
-        bookingId: options.bookingId,
-        details: options.details,
-      });
-
-      const sent = await this.mail.send(
-        recipient.email,
-        subject,
-        html,
-      );
-
-      if (!sent) {
-        this.log.warn(
-          `Booking email was not accepted for recipient ${recipientId}.`,
-        );
-      }
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'Unknown email delivery error';
-
-      this.log.error(
-        `Booking email failed for recipient ${recipientId}: ${message}`,
-      );
-    }
   }
 
   private async isBlockedForBooking(
@@ -397,23 +331,52 @@ export class BookingsService {
       neighborhoodId = primary?.neighborhoodId;
     }
 
-    const booking = await this.prisma.serviceBooking.create({
-      data: {
-        serviceId,
-        artisanProfileId: service.artisanProfile.id,
-        customerId: user.id,
-        neighborhoodId,
-        description: dto.description.trim(),
-        scheduledAt,
-        address: dto.address.trim(),
-        customerPhone: dto.customerPhone
-          ? normalizePhone(dto.customerPhone)
-          : customer.phone,
-      },
-      include: BOOKING_INCLUDE,
-    });
-
     const customerName = displayName(customer);
+
+    // Booking creation and email queueing commit or roll back together.
+    const booking = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.serviceBooking.create({
+        data: {
+          serviceId,
+          artisanProfileId: service.artisanProfile.id,
+          customerId: user.id,
+          neighborhoodId,
+          description: dto.description.trim(),
+          scheduledAt,
+          address: dto.address.trim(),
+          customerPhone: dto.customerPhone
+            ? normalizePhone(dto.customerPhone)
+            : customer.phone,
+        },
+        include: BOOKING_INCLUDE,
+      });
+
+      await this.emailOutbox.enqueueServiceBookingEmail(tx, {
+        recipientId: artisanUserId,
+        subject: `New service booking request: ${service.name}`,
+        dedupeKey: `booking:${created.id}:requested:${artisanUserId}`,
+        payload: {
+          title: 'New booking request',
+          message: `${customerName} has requested your service. Review the booking and respond when you are ready.`,
+          serviceName: service.name,
+          bookingId: created.id,
+          details: [
+            `Customer: ${customerName}`,
+            `Requested date: ${
+              scheduledAt
+                ? scheduledAt.toLocaleString('en-NG', {
+                    dateStyle: 'medium',
+                    timeStyle: 'short',
+                    timeZone: 'Africa/Lagos',
+                  })
+                : 'Not specified'
+            }`,
+          ],
+        },
+      });
+
+      return created;
+    });
 
     await this.notifications.send([artisanUserId], {
       type: 'SERVICE_BOOKING',
@@ -424,30 +387,6 @@ export class BookingsService {
       },
     });
 
-    // Email the artisan about the new request.
-    await this.sendBookingEmail(
-      artisanUserId,
-      `New service booking request: ${service.name}`,
-      {
-        title: 'New booking request',
-        message: `${customerName} has requested your service. Review the booking and respond when you are ready.`,
-        serviceName: service.name,
-        bookingId: booking.id,
-        details: [
-          `Customer: ${customerName}`,
-          `Requested date: ${
-            scheduledAt
-              ? scheduledAt.toLocaleString('en-NG', {
-                  dateStyle: 'medium',
-                  timeStyle: 'short',
-                  timeZone: 'Africa/Lagos',
-                })
-              : 'Not specified'
-          }`,
-        ],
-      },
-    );
-
     return this.present(booking, user.id);
   }
 
@@ -456,17 +395,18 @@ export class BookingsService {
   /**
    * Moves a booking to a new status if the caller is allowed to.
    *
-   * The update only succeeds if the status is still what we read,
-   * so two taps or two people cannot apply the same step twice.
+   * The status update and email queue record are written in the same
+   * transaction. The conditional update prevents duplicate transitions.
    */
   private async move(
     user: AuthUser,
     id: string,
     to: ServiceBookingStatus,
     data: Prisma.ServiceBookingUpdateManyMutationInput = {},
+    emailFactory?: BookingEmailFactory,
   ) {
     const booking = await this.loadFor(user, id);
-    const role =
+    const role: BookingRole =
       booking.customerId === user.id ? 'customer' : 'artisan';
 
     const allowed = FLOW[booking.status][to];
@@ -513,6 +453,13 @@ export class BookingsService {
           },
         });
       }
+
+      if (emailFactory) {
+        await this.emailOutbox.enqueueServiceBookingEmail(
+          tx,
+          emailFactory(booking, role),
+        );
+      }
     });
 
     return {
@@ -544,6 +491,11 @@ export class BookingsService {
     id: string,
     dto: AcceptBookingDto,
   ) {
+    const price =
+      dto.quotedPrice !== undefined
+        ? money(dto.quotedPrice).toFixed(2)
+        : undefined;
+
     const { booking } = await this.move(
       user,
       id,
@@ -555,12 +507,19 @@ export class BookingsService {
             }
           : {}),
       },
+      (current) => ({
+        recipientId: current.customerId,
+        subject: `Your booking was accepted: ${current.service.name}`,
+        dedupeKey: `booking:${current.id}:accepted:${current.customerId}`,
+        payload: {
+          title: 'Booking accepted',
+          message: `Good news! Your booking request for ${current.service.name} has been accepted by the artisan.`,
+          serviceName: current.service.name,
+          bookingId: current.id,
+          details: price ? [`Quoted price: ₦${price}`] : [],
+        },
+      }),
     );
-
-    const price =
-      dto.quotedPrice !== undefined
-        ? money(dto.quotedPrice).toFixed(2)
-        : undefined;
 
     await this.tell(
       booking.customerId,
@@ -569,20 +528,6 @@ export class BookingsService {
         price ? ` Quoted price: ₦${price}.` : ''
       }`,
       id,
-    );
-
-    await this.sendBookingEmail(
-      booking.customerId,
-      `Your booking was accepted: ${booking.service.name}`,
-      {
-        title: 'Booking accepted',
-        message: `Good news! Your booking request for ${booking.service.name} has been accepted by the artisan.`,
-        serviceName: booking.service.name,
-        bookingId: id,
-        details: price
-          ? [`Quoted price: ₦${price}`]
-          : [],
-      },
     );
 
     return this.get(user, id);
@@ -595,13 +540,26 @@ export class BookingsService {
     id: string,
     dto: ReasonDto,
   ) {
+    const reason = dto.reason?.trim();
+
     const { booking } = await this.move(
       user,
       id,
       'DECLINED',
+      {},
+      (current) => ({
+        recipientId: current.customerId,
+        subject: `Booking declined: ${current.service.name}`,
+        dedupeKey: `booking:${current.id}:declined:${current.customerId}`,
+        payload: {
+          title: 'Booking declined',
+          message: `Unfortunately, your booking request for ${current.service.name} was declined by the artisan.`,
+          serviceName: current.service.name,
+          bookingId: current.id,
+          details: reason ? [`Reason: ${reason}`] : [],
+        },
+      }),
     );
-
-    const reason = dto.reason?.trim();
 
     await this.tell(
       booking.customerId,
@@ -610,18 +568,6 @@ export class BookingsService {
         reason ? ` ${reason}` : ''
       }`,
       id,
-    );
-
-    await this.sendBookingEmail(
-      booking.customerId,
-      `Booking declined: ${booking.service.name}`,
-      {
-        title: 'Booking declined',
-        message: `Unfortunately, your booking request for ${booking.service.name} was declined by the artisan.`,
-        serviceName: booking.service.name,
-        bookingId: id,
-        details: reason ? [`Reason: ${reason}`] : [],
-      },
     );
 
     return this.get(user, id);
@@ -645,6 +591,12 @@ export class BookingsService {
       );
     }
 
+    const formattedDate = scheduledAt.toLocaleString('en-NG', {
+      dateStyle: 'full',
+      timeStyle: 'short',
+      timeZone: 'Africa/Lagos',
+    });
+
     const { booking } = await this.move(
       user,
       id,
@@ -652,33 +604,25 @@ export class BookingsService {
       {
         scheduledAt,
       },
+      (current) => ({
+        recipientId: current.customerId,
+        subject: `Booking scheduled: ${current.service.name}`,
+        dedupeKey: `booking:${current.id}:scheduled:${current.customerId}`,
+        payload: {
+          title: 'Booking scheduled',
+          message: `Your booking for ${current.service.name} has been scheduled.`,
+          serviceName: current.service.name,
+          bookingId: current.id,
+          details: [`Scheduled date: ${formattedDate}`],
+        },
+      }),
     );
-
-    const formattedDate = scheduledAt.toLocaleString('en-NG', {
-      dateStyle: 'full',
-      timeStyle: 'short',
-      timeZone: 'Africa/Lagos',
-    });
 
     await this.tell(
       booking.customerId,
       'Booking scheduled',
       `${booking.service.name} is set for ${formattedDate}.`,
       id,
-    );
-
-    await this.sendBookingEmail(
-      booking.customerId,
-      `Booking scheduled: ${booking.service.name}`,
-      {
-        title: 'Booking scheduled',
-        message: `Your booking for ${booking.service.name} has been scheduled.`,
-        serviceName: booking.service.name,
-        bookingId: id,
-        details: [
-          `Scheduled date: ${formattedDate}`,
-        ],
-      },
     );
 
     return this.get(user, id);
@@ -691,6 +635,18 @@ export class BookingsService {
       user,
       id,
       'IN_PROGRESS',
+      {},
+      (current) => ({
+        recipientId: current.customerId,
+        subject: `Work has started: ${current.service.name}`,
+        dedupeKey: `booking:${current.id}:started:${current.customerId}`,
+        payload: {
+          title: 'Work has started',
+          message: `The artisan has marked your ${current.service.name} booking as in progress.`,
+          serviceName: current.service.name,
+          bookingId: current.id,
+        },
+      }),
     );
 
     await this.tell(
@@ -698,17 +654,6 @@ export class BookingsService {
       'Work has started',
       `${booking.service.name} is now in progress.`,
       id,
-    );
-
-    await this.sendBookingEmail(
-      booking.customerId,
-      `Work has started: ${booking.service.name}`,
-      {
-        title: 'Work has started',
-        message: `The artisan has marked your ${booking.service.name} booking as in progress.`,
-        serviceName: booking.service.name,
-        bookingId: id,
-      },
     );
 
     return this.get(user, id);
@@ -728,6 +673,8 @@ export class BookingsService {
         ? money(dto.finalPrice)
         : existing.quotedPrice;
 
+    const finalPriceText = finalPrice?.toFixed(2);
+
     const { booking } = await this.move(
       user,
       id,
@@ -736,6 +683,20 @@ export class BookingsService {
         completedAt: new Date(),
         ...(finalPrice ? { finalPrice } : {}),
       },
+      (current) => ({
+        recipientId: current.customerId,
+        subject: `Job completed: ${current.service.name}`,
+        dedupeKey: `booking:${current.id}:completed:${current.customerId}`,
+        payload: {
+          title: 'Your service is complete',
+          message: `The artisan has marked your ${current.service.name} booking as completed. You can now share your experience by leaving a review.`,
+          serviceName: current.service.name,
+          bookingId: current.id,
+          details: finalPriceText
+            ? [`Final price: ₦${finalPriceText}`]
+            : [],
+        },
+      }),
     );
 
     await this.tell(
@@ -743,20 +704,6 @@ export class BookingsService {
       'Job completed',
       `${booking.service.name} is done. How did it go? Leave a review.`,
       id,
-    );
-
-    await this.sendBookingEmail(
-      booking.customerId,
-      `Job completed: ${booking.service.name}`,
-      {
-        title: 'Your service is complete',
-        message: `The artisan has marked your ${booking.service.name} booking as completed. You can now share your experience by leaving a review.`,
-        serviceName: booking.service.name,
-        bookingId: id,
-        details: finalPrice
-          ? [`Final price: ₦${finalPrice.toFixed(2)}`]
-          : [],
-      },
     );
 
     return this.get(user, id);
@@ -769,18 +716,41 @@ export class BookingsService {
     id: string,
     dto: ReasonDto,
   ) {
+    const reason = dto.reason?.trim();
+
     const { booking, role } = await this.move(
       user,
       id,
       'CANCELLED',
+      {},
+      (current, actorRole) => {
+        const otherSide =
+          actorRole === 'customer'
+            ? current.artisan.userId
+            : current.customerId;
+
+        return {
+          recipientId: otherSide,
+          subject: `Booking cancelled: ${current.service.name}`,
+          dedupeKey: `booking:${current.id}:cancelled:${otherSide}`,
+          payload: {
+            title: 'Booking cancelled',
+            message: `The ${actorRole} has cancelled the booking for ${current.service.name}.`,
+            serviceName: current.service.name,
+            bookingId: current.id,
+            details: [
+              `Cancelled by: ${actorRole}`,
+              ...(reason ? [`Reason: ${reason}`] : []),
+            ],
+          },
+        };
+      },
     );
 
     const otherSide =
       role === 'customer'
         ? booking.artisan.userId
         : booking.customerId;
-
-    const reason = dto.reason?.trim();
 
     const message =
       `${booking.service.name} was cancelled by the ${role}.` +
@@ -791,21 +761,6 @@ export class BookingsService {
       'Booking cancelled',
       message,
       id,
-    );
-
-    await this.sendBookingEmail(
-      otherSide,
-      `Booking cancelled: ${booking.service.name}`,
-      {
-        title: 'Booking cancelled',
-        message: `The ${role} has cancelled the booking for ${booking.service.name}.`,
-        serviceName: booking.service.name,
-        bookingId: id,
-        details: [
-          `Cancelled by: ${role}`,
-          ...(reason ? [`Reason: ${reason}`] : []),
-        ],
-      },
     );
 
     return this.get(user, id);
@@ -857,17 +812,11 @@ export class BookingsService {
     });
 
     const hasMore = rows.length > limit;
-    const items = hasMore
-      ? rows.slice(0, limit)
-      : rows;
+    const items = hasMore ? rows.slice(0, limit) : rows;
 
     return {
-      items: items.map((row) =>
-        this.present(row, viewerId),
-      ),
-      nextCursor: hasMore
-        ? items[items.length - 1].id
-        : null,
+      items: items.map((row) => this.present(row, viewerId)),
+      nextCursor: hasMore ? items[items.length - 1].id : null,
     };
   }
 
@@ -906,6 +855,9 @@ export class BookingsService {
   /**
    * A request nobody answers for a week is cancelled
    * so customers can move on.
+   *
+   * Each successful cancellation and its email queue record
+   * are committed together.
    */
   @Cron(CronExpression.EVERY_DAY_AT_9AM)
   async expireUnansweredRequests(): Promise<void> {
@@ -933,19 +885,44 @@ export class BookingsService {
         return;
       }
 
-      await this.prisma.serviceBooking.updateMany({
-        where: {
-          id: {
-            in: stale.map((row) => row.id),
-          },
-          status: 'REQUESTED',
-        },
-        data: {
-          status: 'CANCELLED',
-        },
+      const expired = await this.prisma.$transaction(async (tx) => {
+        const successfullyExpired: typeof stale = [];
+
+        for (const row of stale) {
+          const claimed = await tx.serviceBooking.updateMany({
+            where: {
+              id: row.id,
+              status: 'REQUESTED',
+            },
+            data: {
+              status: 'CANCELLED',
+            },
+          });
+
+          // Another request may have changed this booking already.
+          if (claimed.count !== 1) {
+            continue;
+          }
+
+          await this.emailOutbox.enqueueServiceBookingEmail(tx, {
+            recipientId: row.customerId,
+            subject: `Booking request expired: ${row.service.name}`,
+            dedupeKey: `booking:${row.id}:expired:${row.customerId}`,
+            payload: {
+              title: 'Booking request expired',
+              message: `Nobody answered your booking request for ${row.service.name} within the response period, so it has been cancelled. You can now find and book another artisan.`,
+              serviceName: row.service.name,
+              bookingId: row.id,
+            },
+          });
+
+          successfullyExpired.push(row);
+        }
+
+        return successfullyExpired;
       });
 
-      for (const row of stale) {
+      for (const row of expired) {
         const message =
           `Nobody answered your request for ${row.service.name}, ` +
           'so it was cancelled. You can book someone else.';
@@ -956,17 +933,6 @@ export class BookingsService {
           message,
           row.id,
         );
-
-        await this.sendBookingEmail(
-          row.customerId,
-          `Booking request expired: ${row.service.name}`,
-          {
-            title: 'Booking request expired',
-            message: `Nobody answered your booking request for ${row.service.name} within the response period, so it has been cancelled. You can now find and book another artisan.`,
-            serviceName: row.service.name,
-            bookingId: row.id,
-          },
-        );
       }
     } catch (error: unknown) {
       const message =
@@ -974,9 +940,7 @@ export class BookingsService {
           ? error.message
           : 'Unknown expiry error';
 
-      this.log.error(
-        `Expiring requests failed: ${message}`,
-      );
+      this.log.error(`Expiring requests failed: ${message}`);
     }
   }
 }

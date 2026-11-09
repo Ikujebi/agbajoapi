@@ -9,6 +9,9 @@ export * from './wallet';
 export * from './giving';
 export * from './reports';
 export * from './expenses';
+export * from './inventory';
+export * from './sos';
+export * from './visitors';
 export {
   baseEmailLayout,
   escapeHtml,

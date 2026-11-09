@@ -5,7 +5,7 @@ import { ConfigModule } from '@nestjs/config';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EstateUnitsModule } from './estate-units/estate-units.module';
-
+import { EmailOutboxModule } from './email-outbox/email-outbox.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { MailModule } from './mail/mail.module';
 import { AuthModule } from './auth/auth.module';
@@ -72,6 +72,7 @@ import {NeighborhoodsModule} from './neighborhoods/neighborhoods.module';
     MarketplaceModule,
     ModerationModule,
     NeighborhoodsModule,
+    EmailOutboxModule,
   ],
   providers: [
     {

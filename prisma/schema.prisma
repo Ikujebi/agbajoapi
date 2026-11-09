@@ -159,7 +159,12 @@ enum SosStatus {
   RESOLVED
   CANCELLED
 }
-
+enum EmailOutboxStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
 enum OtpPurpose {
   PASSWORD_RESET
   VERIFY_PHONE
@@ -1518,4 +1523,25 @@ model EventMedia {
   event Event @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
   @@index([eventId, createdAt])
+}
+model EmailOutbox {
+  id              String            @id @default(uuid())
+  dedupeKey       String?           @unique
+  recipientEmail  String
+  subject         String
+  templateKey     String
+  payload         Json
+  status          EmailOutboxStatus @default(PENDING)
+  attempts        Int               @default(0)
+  maxAttempts     Int               @default(5)
+  nextAttemptAt   DateTime          @default(now())
+  lockedAt        DateTime?
+  sentAt          DateTime?
+  lastError       String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([status, nextAttemptAt])
+  @@index([status, lockedAt])
+  @@index([createdAt])
 }

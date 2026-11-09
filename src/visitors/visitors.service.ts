@@ -17,6 +17,7 @@ import { OrganizationsService } from '../organizations/organizations.service';
 import { OrgHoursService } from '../org-hours/org-hours.service';
 import { SmsService } from '../sms/sms.service';
 import { MailService } from '../mail/mail.service';
+import { visitorPassTemplate } from '../mail/templates';
 import { PermissionsService } from '../common/permissions/permissions.service';
 import { Permission } from '../common/permissions/permissions';
 import { AuthUser } from '../common/decorators/current-user.decorator';
@@ -36,19 +37,6 @@ const normalizeCode = (code: string): string => code.trim().toUpperCase();
 const MAX_PASS_SMS_PER_DAY = 20;
 const MAX_PASS_EMAIL_PER_DAY = 30;
 const SEND_TIMEOUT_MS = 8000;
-
-const escapeHtml = (value: string): string =>
-  value.replace(/[&<>"']/g, (char) => {
-    const entities: Record<string, string> = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;',
-    };
-
-    return entities[char];
-  });
 
 /**
  * Turns what a host typed into E.164 (+2348031234567), or null if it is not
@@ -192,7 +180,6 @@ export class VisitorsService {
   }
 
   private async assertEmailAllowance(hostId: string): Promise<void> {
-    // Passes created with a visitor email in the last 24 hours.
     const recent = await this.prisma.visitorPass.count({
       where: {
         hostId,
@@ -244,31 +231,6 @@ export class VisitorsService {
     );
   }
 
-  private buildEmailHtml(a: {
-    visitorName: string;
-    hostName: string;
-    estateName: string;
-    code: string;
-    validUntil: Date;
-    directionsUrl: string | null;
-  }): string {
-    const link = a.directionsUrl
-      ? `<p><a href="${escapeHtml(a.directionsUrl)}" style="display:inline-block;padding:10px 18px;background:#1a56db;color:#ffffff;text-decoration:none;border-radius:6px">Get directions</a></p>` +
-        `<p style="font-size:12px;color:#666666">Or open this link: ${escapeHtml(a.directionsUrl)}</p>`
-      : '';
-
-    return (
-      `<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;color:#111111">` +
-      `<h2>${escapeHtml(a.estateName)}</h2>` +
-      `<p>Hi ${escapeHtml(a.visitorName)},</p>` +
-      `<p>${escapeHtml(a.hostName)} has invited you. Show this code to security at the gate:</p>` +
-      `<p style="font-size:28px;font-weight:bold;letter-spacing:4px">${escapeHtml(a.code)}</p>` +
-      `<p>Valid until ${escapeHtml(formatLagos(a.validUntil))}.</p>` +
-      link +
-      `</div>`
-    );
-  }
-
   /**
    * Sends the pass SMS. Never throws: a failed SMS must not undo a pass that
    * was already created. Returns whether the provider accepted the message.
@@ -284,7 +246,6 @@ export class VisitorsService {
         SEND_TIMEOUT_MS,
       );
     } catch (error) {
-      // The message holds the pass code, so it is never logged.
       this.log.warn(`Pass SMS failed: ${(error as Error).message}`);
       return false;
     }
@@ -487,7 +448,6 @@ export class VisitorsService {
           directionsUrl,
         };
 
-        // Ready-made text the app can copy, or open straight in WhatsApp.
         const shareMessage = this.buildShareText(content);
         const whatsappPhone = normalizePhone(dto.visitorPhone);
         const whatsappUrl = `https://wa.me/${
@@ -506,14 +466,18 @@ export class VisitorsService {
             ? this.sendPassEmail({
                 to: visitorEmail,
                 estateName: organization.name,
-                html: this.buildEmailHtml(content),
+                html: visitorPassTemplate({
+                  visitorName: content.visitorName,
+                  hostName: content.hostName,
+                  estateName: content.estateName,
+                  code: content.code,
+                  validUntil: content.validUntil,
+                  directionsUrl: content.directionsUrl,
+                }),
               })
             : null,
         ]);
 
-        // The readable code is returned only once, at creation, so the app
-        // should show shareMessage / whatsappUrl right away.
-        // smsSent and emailSent are null when that channel was not requested.
         return {
           ...pass,
           code,
@@ -528,7 +492,6 @@ export class VisitorsService {
           error instanceof Prisma.PrismaClientKnownRequestError &&
           error.code === 'P2002'
         ) {
-          // Retry if the generated code collides with an existing codeHash.
           continue;
         }
 
@@ -625,8 +588,7 @@ export class VisitorsService {
       throw unavailable();
     }
 
-    // COMPLETED is allowed on purpose: after the gate scan the visitor still
-    // needs directions inside the estate.
+    // COMPLETED is allowed: the visitor may still need directions inside.
     if (pass.status === 'REVOKED' || pass.status === 'EXPIRED') {
       throw unavailable();
     }
@@ -668,7 +630,6 @@ export class VisitorsService {
   async verify(user: AuthUser, dto: VerifyPassDto) {
     await this.assertEstate(user, dto.organizationId, 'visitor.verify');
 
-    // Entry is only allowed during the estate's visiting hours.
     await this.hours.assertOpen(
       dto.organizationId,
       'VISITING',
@@ -725,8 +686,6 @@ export class VisitorsService {
     }
 
     const result = await this.prisma.$transaction(async (tx) => {
-      // Conditional update prevents two simultaneous scans from consuming
-      // the same remaining entry.
       const updatedCount = await tx.visitorPass.updateMany({
         where: {
           id: pass.id,
@@ -780,14 +739,12 @@ export class VisitorsService {
       visitorName: pass.visitorName,
       purpose: pass.purpose,
       host: pass.host,
-      // Security sees only the unit label, never the map coordinates.
       destination: unitLabel(pass.destinationUnit),
       pass: result,
     };
   }
 
   async exit(user: AuthUser, dto: VerifyPassDto) {
-    // Exit is always allowed, even outside visiting hours.
     await this.assertEstate(user, dto.organizationId, 'visitor.verify');
 
     const pass = await this.prisma.visitorPass.findFirst({

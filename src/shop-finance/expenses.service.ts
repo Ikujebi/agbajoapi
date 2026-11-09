@@ -1,3 +1,4 @@
+
 import {
   BadRequestException,
   Injectable,
@@ -9,9 +10,17 @@ import { AuditAction, ExpenseCategory, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { PermissionsService } from '../common/permissions/permissions.service';
+import { rolesWith } from '../common/permissions/permissions';
 import { AuthUser } from '../common/decorators/current-user.decorator';
 import { parseDate } from '../common/utils/dates';
 import { CreateExpenseDto, UpdateExpenseDto } from './dto/expense.dto';
+
+import { MailService } from '../mail/mail.service';
+import { MailTemplatesService } from '../mail/mail-templates.service';
+import {
+  expenseActivityTemplate,
+  ExpenseActivityType,
+} from '../mail/templates';
 
 type Tx = Prisma.TransactionClient;
 
@@ -25,6 +34,8 @@ export class ExpensesService {
     private readonly prisma: PrismaService,
     private readonly permissions: PermissionsService,
     private readonly cloudinary: CloudinaryService,
+    private readonly mail: MailService,
+    private readonly mailTemplates: MailTemplatesService,
   ) {}
 
   /** Every change to money records leaves a trace, in the same transaction. */
@@ -56,6 +67,127 @@ export class ExpensesService {
     return date;
   }
 
+  /**
+   * Notify approved shop members who have finance.view.
+   * Email errors must never interrupt the expense operation.
+   */
+  private async notifyFinanceStaff(
+    organizationId: string,
+    actorId: string,
+    activity: ExpenseActivityType,
+    expense: {
+      id: string;
+      description: string;
+      category: ExpenseCategory;
+      amount: Prisma.Decimal;
+      incurredAt: Date;
+      reference: string | null;
+    },
+    changes?: string[],
+  ): Promise<void> {
+    try {
+      const [organization, staff] = await Promise.all([
+        this.prisma.organization.findUnique({
+          where: { id: organizationId },
+          select: { name: true },
+        }),
+        this.prisma.membership.findMany({
+          where: {
+            organizationId,
+            status: 'APPROVED',
+            role: { in: rolesWith('SHOP', 'finance.view') },
+            userId: { not: actorId },
+          },
+          select: {
+            user: {
+              select: {
+                id: true,
+                email: true,
+                firstName: true,
+              },
+            },
+          },
+        }),
+      ]);
+
+      if (!organization || staff.length === 0) {
+        return;
+      }
+
+      const recipients = new Map<
+        string,
+        { email: string; firstName?: string }
+      >();
+
+      for (const member of staff) {
+        const email = member.user.email?.trim();
+
+        if (
+          !email ||
+          email.toLowerCase().endsWith('@pay.neighborhood.app')
+        ) {
+          continue;
+        }
+
+        recipients.set(email.toLowerCase(), {
+          email,
+          firstName: member.user.firstName || undefined,
+        });
+      }
+
+      if (recipients.size === 0) {
+        return;
+      }
+
+      const subjectByActivity: Record<ExpenseActivityType, string> = {
+        CREATED: 'New expense recorded',
+        UPDATED: 'Expense record updated',
+        DELETED: 'Expense record deleted',
+        RECEIPT_ATTACHED: 'Expense receipt attached',
+      };
+
+      const baseOptions = {
+        organizationName: organization.name,
+        expenseId: expense.id,
+        activity,
+        description: expense.description,
+        category: expense.category,
+        amount: expense.amount.toFixed(2),
+        incurredAt: expense.incurredAt,
+        reference: expense.reference,
+        changes,
+      };
+
+      await Promise.all(
+        [...recipients.values()].map(async (recipient) => {
+          try {
+            const html = expenseActivityTemplate({
+              ...baseOptions,
+              recipientName: recipient.firstName,
+            });
+
+            await this.mail.send(
+              recipient.email,
+              subjectByActivity[activity],
+              html,
+              {
+                idempotencyKey: `expense-${expense.id}-${activity}-${recipient.email.toLowerCase()}`,
+              },
+            );
+          } catch (error) {
+            this.log.warn(
+              `Could not send expense email to ${recipient.email}: ${(error as Error).message}`,
+            );
+          }
+        }),
+      );
+    } catch (error) {
+      this.log.error(
+        `Expense notification failed for ${organizationId}: ${(error as Error).message}`,
+      );
+    }
+  }
+
   async create(
     user: AuthUser,
     organizationId: string,
@@ -65,8 +197,8 @@ export class ExpensesService {
 
     const amount = money(dto.amount);
 
-    return this.prisma.$transaction(async (tx) => {
-      const expense = await tx.expense.create({
+    const expense = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.expense.create({
         data: {
           organizationId,
           recordedById: user.id,
@@ -80,14 +212,23 @@ export class ExpensesService {
         },
       });
 
-      await this.audit(tx, user, organizationId, 'CREATE', expense.id, {
+      await this.audit(tx, user, organizationId, 'CREATE', created.id, {
         amount: amount.toFixed(2),
-        category: expense.category,
-        description: expense.description,
+        category: created.category,
+        description: created.description,
       });
 
-      return expense;
+      return created;
     });
+
+    await this.notifyFinanceStaff(
+      organizationId,
+      user.id,
+      'CREATED',
+      expense,
+    );
+
+    return expense;
   }
 
   async list(
@@ -210,11 +351,19 @@ export class ExpensesService {
     }
 
     if (dto.reference !== undefined) {
-      data.reference = dto.reference.trim();
+      const reference = dto.reference.trim();
+
+      if (reference !== (expense.reference ?? '')) {
+        data.reference = reference;
+        changes.reference = {
+          from: expense.reference ?? '',
+          to: reference,
+        };
+      }
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.expense.update({
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.expense.update({
         where: { id },
         data,
       });
@@ -230,8 +379,23 @@ export class ExpensesService {
         );
       }
 
-      return updated;
+      return result;
     });
+
+    if (Object.keys(changes).length > 0) {
+      await this.notifyFinanceStaff(
+        expense.organizationId,
+        user.id,
+        'UPDATED',
+        updated,
+        Object.entries(changes).map(
+          ([field, change]) =>
+            `${field}: "${change.from}" → "${change.to}"`,
+        ),
+      );
+    }
+
+    return updated;
   }
 
   /** Deleting records needs finance.view (owner or accountant), not just expense.manage. */
@@ -260,6 +424,13 @@ export class ExpensesService {
         },
       );
     });
+
+    await this.notifyFinanceStaff(
+      expense.organizationId,
+      user.id,
+      'DELETED',
+      expense,
+    );
 
     if (expense.receiptPublicId) {
       await this.cloudinary
@@ -310,7 +481,6 @@ export class ExpensesService {
       throw error;
     }
 
-    // Remove the previous receipt only after the new one is saved.
     if (expense.receiptPublicId) {
       await this.cloudinary
         .deleteAsset(expense.receiptPublicId)
@@ -320,6 +490,13 @@ export class ExpensesService {
           );
         });
     }
+
+    await this.notifyFinanceStaff(
+      expense.organizationId,
+      user.id,
+      'RECEIPT_ATTACHED',
+      updated,
+    );
 
     return updated;
   }

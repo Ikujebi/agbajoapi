@@ -8,7 +8,7 @@ import {
 
 export type OtpPurpose =
   | 'SIGN_IN'
-  | 'EMAIL_VERIFICATION'
+  | 'VERIFY_EMAIL'
   | 'PASSWORD_RESET'
   | 'ACCOUNT_VERIFICATION'
   | 'GENERAL';
@@ -24,7 +24,7 @@ export interface OtpEmailOptions {
 
 const purposeLabels: Record<OtpPurpose, string> = {
   SIGN_IN: 'complete your sign-in',
-  EMAIL_VERIFICATION: 'verify your email address',
+  VERIFY_EMAIL: 'verify your email address',
   PASSWORD_RESET: 'reset your password',
   ACCOUNT_VERIFICATION: 'verify your account',
   GENERAL: 'complete your request',
