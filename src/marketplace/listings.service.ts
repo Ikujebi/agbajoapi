@@ -1,4 +1,6 @@
 
+import { createHash } from 'crypto';
+
 import {
   BadRequestException,
   ForbiddenException,
@@ -14,14 +16,8 @@ import { ListingStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { MailService } from '../mail/mail.service';
-import { MailTemplatesService } from '../mail/mail-templates.service';
+import { EmailOutboxService } from '../email-outbox/email-outbox.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
-
-import {
-  listingInquiryTemplate,
-  listingExpiredTemplate,
-} from '../mail/templates';
 
 import {
   CreateListingDto,
@@ -62,8 +58,7 @@ export class ListingsService {
     private readonly prisma: PrismaService,
     private readonly cloudinary: CloudinaryService,
     private readonly notifications: NotificationsService,
-    private readonly mail: MailService,
-    private readonly mailTemplates: MailTemplatesService,
+    private readonly emailOutbox: EmailOutboxService,
   ) {}
 
   // ---------- helpers ----------
@@ -150,42 +145,6 @@ export class ListingsService {
     ]
       .filter((part): part is string => Boolean(part?.trim()))
       .join(' ');
-  }
-
-  /**
-   * Sends marketplace emails without interrupting
-   * the main marketplace operation.
-   */
-  private async sendMarketplaceEmail(
-    recipient: string | null | undefined,
-    subject: string,
-    html: string,
-  ): Promise<void> {
-    if (!recipient?.trim()) {
-      return;
-    }
-
-    try {
-      const sent = await this.mail.send(
-        recipient.trim(),
-        subject,
-        html,
-      );
-
-      if (!sent) {
-        this.log.warn(
-          `Marketplace email was not accepted for ${recipient}.`,
-        );
-      }
-    } catch (error) {
-      this.log.error(
-        `Marketplace email failed: ${
-          error instanceof Error
-            ? error.message
-            : 'Unknown error'
-        }`,
-      );
-    }
   }
 
   /** Deletes a listing's photos from the database and from Cloudinary. */
@@ -672,10 +631,6 @@ export class ListingsService {
         seller: {
           select: {
             isActive: true,
-            email: true,
-            firstName: true,
-            otherNames: true,
-            lastName: true,
           },
         },
       },
@@ -721,15 +676,44 @@ export class ListingsService {
       );
     }
 
-    const inquiry = await this.prisma.listingInquiry.create({
-      data: {
-        listingId,
-        userId: user.id,
-        message: message.trim(),
-      },
+    const trimmedMessage = message.trim();
+
+    // Create the inquiry and queue its email atomically.
+    const inquiry = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.listingInquiry.create({
+        data: {
+          listingId,
+          userId: user.id,
+          message: trimmedMessage,
+        },
+      });
+
+      const buyer = await tx.user.findUnique({
+        where: { id: user.id },
+        select: {
+          firstName: true,
+          otherNames: true,
+          lastName: true,
+        },
+      });
+
+      await this.emailOutbox.enqueueListingInquiryEmail(tx, {
+        recipientId: listing.sellerId,
+        subject: `New inquiry about your listing: ${listing.title}`,
+        dedupeKey: `listing-inquiry:${created.id}`,
+        payload: {
+          listingTitle: listing.title,
+          buyerName: buyer
+            ? this.getDisplayName(buyer)
+            : undefined,
+          message: created.message,
+        },
+      });
+
+      return created;
     });
 
-    // Push notification is best-effort.
+    // Push notification is best-effort and happens after commit.
     try {
       await this.notifications.send(
         [listing.sellerId],
@@ -747,46 +731,6 @@ export class ListingsService {
     } catch (error) {
       this.log.error(
         `Inquiry notification failed: ${
-          error instanceof Error
-            ? error.message
-            : 'Unknown error'
-        }`,
-      );
-    }
-
-    // Get the buyer's display name for the email.
-    try {
-      const buyer = await this.prisma.user.findUnique({
-        where: { id: user.id },
-        select: {
-          firstName: true,
-          otherNames: true,
-          lastName: true,
-        },
-      });
-
-      const html = this.mailTemplates.render(
-        listingInquiryTemplate,
-        {
-          recipientName: this.getDisplayName(
-            listing.seller,
-          ),
-          listingTitle: listing.title,
-          buyerName: buyer
-            ? this.getDisplayName(buyer)
-            : undefined,
-          message: inquiry.message,
-        },
-      );
-
-      await this.sendMarketplaceEmail(
-        listing.seller.email,
-        `New inquiry about your listing: ${listing.title}`,
-        html,
-      );
-    } catch (error) {
-      this.log.error(
-        `Inquiry email preparation failed: ${
           error instanceof Error
             ? error.message
             : 'Unknown error'
@@ -814,112 +758,125 @@ export class ListingsService {
 
   // ---------- housekeeping ----------
 
-  /** Marks expired listings and notifies their sellers. */
+  /** Marks expired listings and queues grouped seller emails. */
   @Cron(CronExpression.EVERY_HOUR)
   async expireListings(): Promise<void> {
     try {
+      const now = new Date();
+
       const due = await this.prisma.marketplaceListing.findMany({
         where: {
           status: { in: ['ACTIVE', 'RESERVED'] },
-          expiresAt: { lt: new Date() },
+          expiresAt: { lt: now },
         },
         select: {
           id: true,
           title: true,
           sellerId: true,
-          seller: {
-            select: {
-              email: true,
-              firstName: true,
-              otherNames: true,
-              lastName: true,
-            },
-          },
         },
         take: 500,
+        orderBy: {
+          expiresAt: 'asc',
+        },
       });
 
       if (due.length === 0) {
         return;
       }
 
-      const result = await this.prisma.marketplaceListing.updateMany({
-        where: {
-          id: { in: due.map((listing) => listing.id) },
-          status: { in: ['ACTIVE', 'RESERVED'] },
+      /*
+       * Only listings successfully changed to EXPIRED are included.
+       * Each successful update and its seller's email record are
+       * committed in the same transaction.
+       */
+      const expiredGroups = await this.prisma.$transaction(
+        async (tx) => {
+          const perSeller = new Map<
+            string,
+            {
+              listingIds: string[];
+              titles: string[];
+            }
+          >();
+
+          for (const listing of due) {
+            const updated = await tx.marketplaceListing.updateMany({
+              where: {
+                id: listing.id,
+                status: { in: ['ACTIVE', 'RESERVED'] },
+                expiresAt: { lt: now },
+              },
+              data: {
+                status: 'EXPIRED',
+              },
+            });
+
+            // Another request or worker may have changed this listing.
+            if (updated.count !== 1) {
+              continue;
+            }
+
+            const existing = perSeller.get(listing.sellerId);
+
+            if (existing) {
+              existing.listingIds.push(listing.id);
+              existing.titles.push(listing.title);
+            } else {
+              perSeller.set(listing.sellerId, {
+                listingIds: [listing.id],
+                titles: [listing.title],
+              });
+            }
+          }
+
+          // Queue one expiry email for each seller.
+          for (const [sellerId, seller] of perSeller) {
+            const count = seller.listingIds.length;
+
+            // Stable hash keeps the dedupe key short.
+            const sortedIds = [...seller.listingIds].sort();
+
+            const hash = createHash('sha256')
+              .update(sortedIds.join(':'))
+              .digest('hex');
+
+            await this.emailOutbox.enqueueListingExpiredEmail(
+              tx,
+              {
+                recipientId: sellerId,
+                subject: `${count} marketplace listing${count === 1 ? '' : 's'} expired`,
+                dedupeKey: `listing-expired:${sellerId}:${hash}`,
+                payload: {
+                  expiredCount: count,
+                  listingTitles: seller.titles,
+                },
+              },
+            );
+          }
+
+          return Array.from(perSeller.entries()).map(
+            ([sellerId, seller]) => ({
+              sellerId,
+              count: seller.listingIds.length,
+            }),
+          );
         },
-        data: { status: 'EXPIRED' },
-      });
+      );
 
-      if (result.count === 0) {
-        return;
-      }
-
-      const perSeller = new Map<
-        string,
-        {
-          email: string | null;
-          name: string;
-          titles: string[];
-        }
-      >();
-
-      for (const listing of due) {
-        const existing = perSeller.get(listing.sellerId);
-
-        if (existing) {
-          existing.titles.push(listing.title);
-        } else {
-          perSeller.set(listing.sellerId, {
-            email: listing.seller.email,
-            name: this.getDisplayName(listing.seller),
-            titles: [listing.title],
-          });
-        }
-      }
-
-      for (const [sellerId, seller] of perSeller) {
-        const count = seller.titles.length;
-
-        // Push notification is best-effort.
+      // Push notifications happen after the transaction commits.
+      for (const seller of expiredGroups) {
         try {
           await this.notifications.send(
-            [sellerId],
+            [seller.sellerId],
             {
               type: 'GENERAL',
               title: 'Listings expired',
-              body: `${count} of your listing${count === 1 ? ' has' : 's have'} expired. Renew ${count === 1 ? 'it' : 'them'} to keep selling.`,
+              body: `${seller.count} of your listing${seller.count === 1 ? ' has' : 's have'} expired. Renew ${seller.count === 1 ? 'it' : 'them'} to keep selling.`,
             },
           );
         } catch (error) {
           this.log.error(
-            `Listing expiry notification failed for seller ${sellerId}: ${
-              error instanceof Error
-                ? error.message
-                : 'Unknown error'
-            }`,
-          );
-        }
-
-        // Email delivery is best-effort.
-        try {
-          const html = this.mailTemplates.render(
-            listingExpiredTemplate,
-            {
-              recipientName: seller.name,
-              expiredCount: count,
-              listingTitles: seller.titles,
-            },
-          );
-
-          await this.sendMarketplaceEmail(
-            seller.email,
-            `${count} marketplace listing${count === 1 ? '' : 's'} expired`,
-            html,
-          );
-        } catch (error) {
-          this.log.error(
-            `Listing expiry email preparation failed for seller ${sellerId}: ${
+            `Listing expiry notification failed for seller ${seller.sellerId}: ${
               error instanceof Error
                 ? error.message
                 : 'Unknown error'
@@ -927,6 +884,10 @@ export class ListingsService {
           );
         }
       }
+
+      this.log.log(
+        `Listing expiry completed. ${due.length} due listing(s) checked; ${expiredGroups.reduce((total, seller) => total + seller.count, 0)} listing(s) expired across ${expiredGroups.length} seller(s).`,
+      );
     } catch (error) {
       this.log.error(
         `Listing expiry failed: ${

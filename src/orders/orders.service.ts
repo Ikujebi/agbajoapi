@@ -1,4 +1,3 @@
-
 import {
   BadRequestException,
   ConflictException,
@@ -30,17 +29,7 @@ import {
   UpdateOrderStatusDto,
 } from './dto';
 import { NotificationsService } from '../notifications/notifications.service';
-
-import { MailService } from '../mail/mail.service';
-import { MailTemplatesService } from '../mail/mail-templates.service';
-
-import {
-  newOrderNotificationTemplate,
-  orderConfirmationTemplate,
-  orderReceiptTemplate,
-  orderStatusTemplate,
-  paymentConfirmationTemplate,
-} from '../mail/templates';
+import { EmailOutboxService } from '../email-outbox/email-outbox.service';
 
 type Tx = Prisma.TransactionClient;
 
@@ -88,8 +77,7 @@ export class OrdersService {
     private readonly permissions: PermissionsService,
     private readonly hours: OrgHoursService,
     private readonly notifications: NotificationsService,
-    private readonly mail: MailService,
-    private readonly mailTemplates: MailTemplatesService,
+    private readonly emailOutbox: EmailOutboxService,
   ) {}
 
   // ---------- helpers ----------
@@ -124,27 +112,6 @@ export class OrdersService {
     });
 
     return rows.map((row) => row.userId);
-  }
-
-  /** Retrieves email addresses for approved order-management staff. */
-  private async getOrderStaff(organizationId: string) {
-    return this.prisma.membership.findMany({
-      where: {
-        organizationId,
-        status: 'APPROVED',
-        role: { in: rolesWith('SHOP', 'order.manage') },
-      },
-      select: {
-        user: {
-          select: {
-            email: true,
-            firstName: true,
-            otherNames: true,
-            lastName: true,
-          },
-        },
-      },
-    });
   }
 
   private async notify(
@@ -195,49 +162,6 @@ export class OrdersService {
     }).format(value);
   }
 
-  /**
-   * Sends an email without allowing an email-provider failure
-   * to interrupt the main order operation.
-   */
-  private async sendEmailSafely(
-    recipient: string | null | undefined,
-    subject: string,
-    html: string,
-  ) {
-    if (!recipient?.trim()) return;
-
-    try {
-      const sent = await this.mail.send(recipient, subject, html);
-
-      if (!sent) {
-        this.log.warn(
-          `Email provider did not accept "${subject}" for ${recipient}`,
-        );
-      }
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown email error';
-
-      this.log.error(
-        `Failed to send "${subject}" to ${recipient}: ${message}`,
-      );
-    }
-  }
-
-  private async getCustomer(userId: string) {
-    return this.prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        email: true,
-        firstName: true,
-        otherNames: true,
-        lastName: true,
-        phone: true,
-      },
-    });
-  }
-
   private getOrderUrl(orderId: string) {
     const baseUrl = this.config
       .get<string>('APP_URL')
@@ -246,10 +170,18 @@ export class OrdersService {
     return baseUrl ? `${baseUrl}/orders/${orderId}` : undefined;
   }
 
-  // ---------- email helpers ----------
+  private newEmailEventId() {
+    return randomBytes(12).toString('hex');
+  }
 
-  /** Sends a new-order notification to shop staff. */
-  private async emailNewOrder(
+  // ---------- email outbox helpers ----------
+
+  /**
+   * Queues a new-order email for every approved order-management staff member.
+   * Each recipient gets a separate outbox record and dedupe key.
+   */
+  private async queueNewOrderEmails(
+    tx: Tx,
     order: {
       id: string;
       orderNumber: string;
@@ -271,148 +203,111 @@ export class OrdersService {
     shopName: string,
     customerEmail?: string | null,
   ) {
-    try {
-      const staff = await this.getOrderStaff(organizationId);
+    const staff = await tx.membership.findMany({
+      where: {
+        organizationId,
+        status: 'APPROVED',
+        role: { in: rolesWith('SHOP', 'order.manage') },
+      },
+      select: {
+        userId: true,
+      },
+    });
 
-      if (staff.length === 0) return;
+    const payload = {
+      customerName: order.customerName,
+      customerEmail: customerEmail ?? undefined,
+      customerPhone: order.customerPhone ?? undefined,
+      shopName,
+      orderNumber: order.orderNumber,
+      items: order.items.map((item) => ({
+        name: item.productName,
+        quantity: item.quantity,
+        unitPrice: this.formatMoney(item.unitPrice),
+        total: this.formatMoney(item.lineTotal),
+      })),
+      subtotal: this.formatMoney(order.subtotal),
+      deliveryFee: this.formatMoney(order.deliveryFee),
+      total: this.formatMoney(order.totalAmount),
+      fulfillmentType: order.deliveryAddress ? 'DELIVERY' as const : 'PICKUP' as const,
+      deliveryAddress: order.deliveryAddress ?? undefined,
+      customerNote: order.deliveryNotes ?? undefined,
+      orderUrl: this.getOrderUrl(order.id),
+    };
 
-      const html = this.mailTemplates.render(
-        newOrderNotificationTemplate,
-        {
-          customerName: order.customerName,
-          customerEmail: customerEmail ?? undefined,
-          customerPhone: order.customerPhone ?? undefined,
-          shopName,
-          orderNumber: order.orderNumber,
-          items: order.items.map((item) => ({
-            name: item.productName,
-            quantity: item.quantity,
-            unitPrice: this.formatMoney(item.unitPrice),
-            total: this.formatMoney(item.lineTotal),
-          })),
-          subtotal: this.formatMoney(order.subtotal),
-          deliveryFee: this.formatMoney(order.deliveryFee),
-          total: this.formatMoney(order.totalAmount),
-          fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
-          deliveryAddress: order.deliveryAddress ?? undefined,
-          customerNote: order.deliveryNotes ?? undefined,
-          orderUrl: this.getOrderUrl(order.id),
-        },
-      );
+    const subject = `New order ${order.orderNumber} · ${shopName}`;
 
-      const subject = `New order ${order.orderNumber} · ${shopName}`;
-
-      for (const member of staff) {
-        await this.sendEmailSafely(
-          member.user.email,
-          subject,
-          this.mailTemplates.render(newOrderNotificationTemplate, {
-            recipientName: this.formatUserName(member.user),
-            customerName: order.customerName,
-            customerEmail: customerEmail ?? undefined,
-            customerPhone: order.customerPhone ?? undefined,
-            shopName,
-            orderNumber: order.orderNumber,
-            items: order.items.map((item) => ({
-              name: item.productName,
-              quantity: item.quantity,
-              unitPrice: this.formatMoney(item.unitPrice),
-              total: this.formatMoney(item.lineTotal),
-            })),
-            subtotal: this.formatMoney(order.subtotal),
-            deliveryFee: this.formatMoney(order.deliveryFee),
-            total: this.formatMoney(order.totalAmount),
-            fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
-            deliveryAddress: order.deliveryAddress ?? undefined,
-            customerNote: order.deliveryNotes ?? undefined,
-            orderUrl: this.getOrderUrl(order.id),
-          }),
-        );
-      }
-
-      void html;
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown email error';
-
-      this.log.error(`New-order email preparation failed: ${message}`);
-    }
-  }
-
-  /** Sends an order confirmation to the customer. */
-  private async emailOrderConfirmation(orderId: string) {
-    try {
-      const order = await this.prisma.order.findUnique({
-        where: { id: orderId },
-        include: {
-          items: true,
-          organization: {
-            select: { name: true },
-          },
-        },
+    for (const member of staff) {
+      await this.emailOutbox.enqueueNewOrderNotificationEmail(tx, {
+        recipientId: member.userId,
+        subject,
+        dedupeKey: `order:${order.id}:new-order-staff:${member.userId}`,
+        payload,
       });
-
-      if (!order) return;
-
-      const customer = await this.getCustomer(order.customerId);
-
-      if (!customer?.email) return;
-
-      const html = this.mailTemplates.render(
-        orderConfirmationTemplate,
-        {
-          recipientName: this.formatUserName(customer),
-          shopName: order.organization.name,
-          orderNumber: order.orderNumber,
-          items: order.items.map((item) => ({
-            name: item.productName,
-            quantity: item.quantity,
-          })),
-          total: this.formatMoney(order.totalAmount),
-          fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
-          orderUrl: this.getOrderUrl(order.id),
-        },
-      );
-
-      await this.sendEmailSafely(
-        customer.email,
-        `Order ${order.orderNumber} received`,
-        html,
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown email error';
-
-      this.log.error(`Order confirmation email failed: ${message}`);
     }
   }
 
-  /** Sends an order status update to the customer. */
-  private async emailOrderStatus(
+  /** Queues the order confirmation email for the customer. */
+  private async queueOrderConfirmationEmail(
+    tx: Tx,
+    orderId: string,
+  ) {
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: true,
+        organization: {
+          select: { name: true },
+        },
+      },
+    });
+
+    if (!order) return;
+
+    await this.emailOutbox.enqueueOrderConfirmationEmail(tx, {
+      recipientId: order.customerId,
+      subject: `Order ${order.orderNumber} received`,
+      dedupeKey: `order:${order.id}:confirmation:${order.customerId}`,
+      payload: {
+        shopName: order.organization.name,
+        orderNumber: order.orderNumber,
+        items: order.items.map((item) => ({
+          name: item.productName,
+          quantity: item.quantity,
+        })),
+        total: this.formatMoney(order.totalAmount),
+        fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
+        orderUrl: this.getOrderUrl(order.id),
+      },
+    });
+  }
+
+  /** Queues an order status email for the customer. */
+  private async queueOrderStatusEmail(
+    tx: Tx,
     orderId: string,
     status: string,
     statusLabel: string,
     message: string,
+    eventId: string,
     nextStep?: string,
   ) {
-    try {
-      const order = await this.prisma.order.findUnique({
-        where: { id: orderId },
-        include: {
-          organization: {
-            select: { name: true },
-          },
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      include: {
+        organization: {
+          select: { name: true },
         },
-      });
+      },
+    });
 
-      if (!order) return;
+    if (!order) return;
 
-      const customer = await this.getCustomer(order.customerId);
-
-      if (!customer?.email) return;
-
-      const html = this.mailTemplates.render(orderStatusTemplate, {
-        recipientName: this.formatUserName(customer),
+    await this.emailOutbox.enqueueOrderStatusEmail(tx, {
+      recipientId: order.customerId,
+      subject: `Order ${order.orderNumber}: ${statusLabel}`,
+      dedupeKey: `order:${order.id}:status:${eventId}:${order.customerId}`,
+      payload: {
         shopName: order.organization.name,
         orderNumber: order.orderNumber,
         status,
@@ -421,57 +316,48 @@ export class OrdersService {
         updatedAt: this.formatDate(new Date()),
         nextStep,
         orderUrl: this.getOrderUrl(order.id),
-      });
-
-      await this.sendEmailSafely(
-        customer.email,
-        `Order ${order.orderNumber}: ${statusLabel}`,
-        html,
-      );
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : 'Unknown email error';
-
-      this.log.error(`Order status email failed: ${errorMessage}`);
-    }
+      },
+    });
   }
 
-  /** Sends a receipt to the customer. */
-  private async emailOrderReceipt(
+  /** Queues a receipt for the customer. */
+  private async queueOrderReceiptEmail(
+    tx: Tx,
     orderId: string,
     paymentReference?: string,
+    eventId?: string,
   ) {
-    try {
-      const order = await this.prisma.order.findUnique({
-        where: { id: orderId },
-        include: {
-          items: true,
-          payments: true,
-          organization: {
-            select: { name: true },
-          },
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: true,
+        payments: true,
+        organization: {
+          select: { name: true },
         },
-      });
+      },
+    });
 
-      if (!order) return;
+    if (!order) return;
 
-      const customer = await this.getCustomer(order.customerId);
+    const successfulPayment = order.payments.find(
+      (payment) => payment.status === 'SUCCEEDED',
+    );
 
-      if (!customer?.email) return;
+    const paymentMethod = successfulPayment?.method
+      ? String(successfulPayment.method)
+      : undefined;
 
-      const successfulPayment = order.payments.find(
-        (payment) => payment.status === 'SUCCEEDED',
-      );
+    const reference = paymentReference ?? order.orderNumber;
 
-      const paymentMethod = successfulPayment?.method
-        ? String(successfulPayment.method)
-        : undefined;
-
-      const html = this.mailTemplates.render(orderReceiptTemplate, {
-        recipientName: this.formatUserName(customer),
+    await this.emailOutbox.enqueueOrderReceiptEmail(tx, {
+      recipientId: order.customerId,
+      subject: `Receipt for order ${order.orderNumber}`,
+      dedupeKey: `order:${order.id}:receipt:${eventId ?? reference}:${order.customerId}`,
+      payload: {
         shopName: order.organization.name,
         orderNumber: order.orderNumber,
-        receiptReference: paymentReference ?? order.orderNumber,
+        receiptReference: reference,
         issuedAt: this.formatDate(new Date()),
         items: order.items.map((item) => ({
           name: item.productName,
@@ -487,79 +373,56 @@ export class OrdersService {
         fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
         deliveryAddress: order.deliveryAddress ?? undefined,
         orderUrl: this.getOrderUrl(order.id),
-      });
-
-      await this.sendEmailSafely(
-        customer.email,
-        `Receipt for order ${order.orderNumber}`,
-        html,
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown email error';
-
-      this.log.error(`Order receipt email failed: ${message}`);
-    }
+      },
+    });
   }
 
-  /** Sends a successful payment confirmation to the customer. */
-  private async emailPaymentConfirmation(
+  /** Queues successful payment confirmation for the customer. */
+  private async queuePaymentConfirmationEmail(
+    tx: Tx,
     orderId: string,
     paymentReference?: string,
+    eventId?: string,
   ) {
-    try {
-      const order = await this.prisma.order.findUnique({
-        where: { id: orderId },
-        include: {
-          payments: true,
-          organization: {
-            select: { name: true },
-          },
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      include: {
+        payments: true,
+        organization: {
+          select: { name: true },
         },
-      });
+      },
+    });
 
-      if (!order) return;
+    if (!order) return;
 
-      const customer = await this.getCustomer(order.customerId);
+    const successfulPayment = order.payments.find(
+      (payment) => payment.status === 'SUCCEEDED',
+    );
 
-      if (!customer?.email) return;
+    const reference = paymentReference ?? order.orderNumber;
 
-      const successfulPayment = order.payments.find(
-        (payment) => payment.status === 'SUCCEEDED',
-      );
-
-      const html = this.mailTemplates.render(
-        paymentConfirmationTemplate,
-        {
-          recipientName: this.formatUserName(customer),
-          shopName: order.organization.name,
-          orderNumber: order.orderNumber,
-          paymentReference: paymentReference ?? order.orderNumber,
-          amountPaid: this.formatMoney(
-            successfulPayment?.amount ?? order.totalAmount,
-          ),
-          currency: 'NGN',
-          paymentMethod: successfulPayment?.method
-            ? String(successfulPayment.method)
-            : undefined,
-          paidAt: successfulPayment?.paidAt
-            ? this.formatDate(successfulPayment.paidAt)
-            : this.formatDate(new Date()),
-          orderUrl: this.getOrderUrl(order.id),
-        },
-      );
-
-      await this.sendEmailSafely(
-        customer.email,
-        `Payment confirmed for order ${order.orderNumber}`,
-        html,
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Unknown email error';
-
-      this.log.error(`Payment confirmation email failed: ${message}`);
-    }
+    await this.emailOutbox.enqueuePaymentConfirmationEmail(tx, {
+      recipientId: order.customerId,
+      subject: `Payment confirmed for order ${order.orderNumber}`,
+      dedupeKey: `order:${order.id}:payment-confirmation:${eventId ?? reference}:${order.customerId}`,
+      payload: {
+        shopName: order.organization.name,
+        orderNumber: order.orderNumber,
+        paymentReference: reference,
+        amountPaid: this.formatMoney(
+          successfulPayment?.amount ?? order.totalAmount,
+        ),
+        currency: 'NGN',
+        paymentMethod: successfulPayment?.method
+          ? String(successfulPayment.method)
+          : undefined,
+        paidAt: successfulPayment?.paidAt
+          ? this.formatDate(successfulPayment.paidAt)
+          : this.formatDate(new Date()),
+        orderUrl: this.getOrderUrl(order.id),
+      },
+    });
   }
 
   // ---------- stock ----------
@@ -637,7 +500,10 @@ export class OrdersService {
     }
   }
 
-  /** Called by PaymentsService inside its transaction after online payment succeeds. */
+  /**
+   * Called by PaymentsService inside its transaction after online payment succeeds.
+   * The order confirmation email is queued in the same transaction.
+   */
   async confirmOrderTx(tx: Tx, orderId: string) {
     const order = await tx.order.findUnique({
       where: { id: orderId },
@@ -657,6 +523,8 @@ export class OrdersService {
       where: { id: orderId },
       data: { status: 'CONFIRMED' },
     });
+
+    await this.queueOrderConfirmationEmail(tx, orderId);
 
     return { confirmed: true as const };
   }
@@ -704,8 +572,37 @@ export class OrdersService {
       { orderId },
     );
 
-    await this.emailPaymentConfirmation(orderId);
-    await this.emailOrderReceipt(orderId);
+    // Queue both emails together after the successful payment has been recorded.
+    await this.prisma.$transaction(async (tx) => {
+      const payment = await tx.payment.findFirst({
+        where: {
+          orderId,
+          status: 'SUCCEEDED',
+        },
+        orderBy: { paidAt: 'desc' },
+        select: {
+          id: true,
+          reference: true,
+        },
+      });
+
+      const reference = payment?.reference ?? order.orderNumber;
+      const eventId = payment?.id ?? reference;
+
+      await this.queuePaymentConfirmationEmail(
+        tx,
+        orderId,
+        reference,
+        eventId,
+      );
+
+      await this.queueOrderReceiptEmail(
+        tx,
+        orderId,
+        reference,
+        eventId,
+      );
+    });
   }
 
   // ---------- create ----------
@@ -809,7 +706,7 @@ export class OrdersService {
         }
       }
 
-      return tx.order.create({
+      const createdOrder = await tx.order.create({
         data: {
           orderNumber: this.newOrderNumber(),
           organizationId: org.id,
@@ -861,6 +758,30 @@ export class OrdersService {
           delivery: true,
         },
       });
+
+      // These records are committed only if the order transaction succeeds.
+      await this.queueNewOrderEmails(
+        tx,
+        {
+          id: createdOrder.id,
+          orderNumber: createdOrder.orderNumber,
+          customerName: createdOrder.customerName,
+          customerPhone: createdOrder.customerPhone,
+          deliveryAddress: createdOrder.deliveryAddress,
+          deliveryNotes: createdOrder.deliveryNotes,
+          subtotal: createdOrder.subtotal,
+          deliveryFee: createdOrder.deliveryFee,
+          totalAmount: createdOrder.totalAmount,
+          items: createdOrder.items,
+        },
+        org.id,
+        org.name,
+        user.email,
+      );
+
+      await this.queueOrderConfirmationEmail(tx, createdOrder.id);
+
+      return createdOrder;
     });
 
     await this.notify(
@@ -874,26 +795,6 @@ export class OrdersService {
       }`,
       { orderId: order.id },
     );
-
-    await this.emailNewOrder(
-      {
-        id: order.id,
-        orderNumber: order.orderNumber,
-        customerName: order.customerName,
-        customerPhone: order.customerPhone,
-        deliveryAddress: order.deliveryAddress,
-        deliveryNotes: order.deliveryNotes,
-        subtotal: order.subtotal,
-        deliveryFee: order.deliveryFee,
-        totalAmount: order.totalAmount,
-        items: order.items,
-      },
-      org.id,
-      org.name,
-      user.email,
-    );
-
-    await this.emailOrderConfirmation(order.id);
 
     return order;
   }
@@ -982,7 +883,15 @@ export class OrdersService {
     order: { id: string; status: OrderStatus },
     to: OrderStatus,
     actorId: string,
+    email?: {
+      status: string;
+      statusLabel: string;
+      message: string;
+      nextStep?: string;
+    },
   ) {
+    const eventId = this.newEmailEventId();
+
     await this.prisma.$transaction(async (tx) => {
       const claimed = await tx.order.updateMany({
         where: {
@@ -1050,6 +959,18 @@ export class OrdersService {
           },
         });
       }
+
+      if (email) {
+        await this.queueOrderStatusEmail(
+          tx,
+          order.id,
+          email.status,
+          email.statusLabel,
+          email.message,
+          eventId,
+          email.nextStep,
+        );
+      }
     });
   }
 
@@ -1110,14 +1031,39 @@ export class OrdersService {
       throw new BadRequestException('This is a delivery order');
     }
 
-    await this.applyStatus(order, to, user.id);
-
     const refundRequired =
       to === 'CANCELLED' &&
       order.payments.some(
         (payment) =>
           payment.status === 'SUCCEEDED' && payment.method !== 'CASH',
       );
+
+    let statusEmail:
+      | {
+          status: string;
+          statusLabel: string;
+          message: string;
+          nextStep?: string;
+        }
+      | undefined;
+
+    if (!isCustomer || staff) {
+      const message = `Your order ${order.orderNumber} ${
+        CUSTOMER_TEXT[to] ?? to.toLowerCase()
+      }.${refundRequired ? ' Your refund will be processed by the shop.' : ''}`;
+
+      statusEmail = {
+        status: to,
+        statusLabel: STATUS_LABELS[to] ?? to,
+        message,
+        nextStep:
+          to === 'CONFIRMED'
+            ? 'The shop will begin processing your order.'
+            : undefined,
+      };
+    }
+
+    await this.applyStatus(order, to, user.id, statusEmail);
 
     if (isCustomer && !staff) {
       await this.notify(
@@ -1127,32 +1073,25 @@ export class OrdersService {
         `${order.orderNumber} was cancelled by the customer.`,
         { orderId },
       );
-    } else {
-      const message = `Your order ${order.orderNumber} ${
-        CUSTOMER_TEXT[to] ?? to.toLowerCase()
-      }.${refundRequired ? ' Your refund will be processed by the shop.' : ''}`;
-
+    } else if (statusEmail) {
       await this.notify(
         [order.customerId],
         'ORDER',
         'Order update',
-        message,
+        statusEmail.message,
         { orderId },
-      );
-
-      await this.emailOrderStatus(
-        orderId,
-        to,
-        STATUS_LABELS[to] ?? to,
-        message,
-        to === 'CONFIRMED'
-          ? 'The shop will begin processing your order.'
-          : undefined,
       );
     }
 
     if (to === 'DELIVERED') {
-      await this.emailOrderReceipt(orderId);
+      await this.prisma.$transaction(async (tx) => {
+        await this.queueOrderReceiptEmail(
+          tx,
+          orderId,
+          undefined,
+          `delivered:${this.newEmailEventId()}`,
+        );
+      });
     }
 
     return {
@@ -1196,13 +1135,29 @@ export class OrdersService {
       );
     }
 
-    const updated = await this.prisma.delivery.update({
-      where: { id: order.delivery.id },
-      data: {
-        assignedAgentId: dto.agentId,
-        status: 'ASSIGNED',
-        assignedAt: new Date(),
-      },
+    const eventId = this.newEmailEventId();
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.delivery.update({
+        where: { id: order.delivery!.id },
+        data: {
+          assignedAgentId: dto.agentId,
+          status: 'ASSIGNED',
+          assignedAt: new Date(),
+        },
+      });
+
+      await this.queueOrderStatusEmail(
+        tx,
+        orderId,
+        'RIDER_ASSIGNED',
+        'Rider assigned',
+        `A rider has been assigned to your order ${order.orderNumber}.`,
+        eventId,
+        'Your rider will contact you regarding delivery.',
+      );
+
+      return result;
     });
 
     await this.notify(
@@ -1219,14 +1174,6 @@ export class OrdersService {
       'Rider assigned',
       `A rider has been assigned to order ${order.orderNumber}.`,
       { orderId },
-    );
-
-    await this.emailOrderStatus(
-      orderId,
-      'RIDER_ASSIGNED',
-      'Rider assigned',
-      `A rider has been assigned to your order ${order.orderNumber}.`,
-      'Your rider will contact you regarding delivery.',
     );
 
     return updated;
@@ -1291,17 +1238,49 @@ export class OrdersService {
     }
 
     const now = new Date();
+    const eventId = this.newEmailEventId();
 
-    const updated = await this.prisma.delivery.update({
-      where: { id: deliveryId },
-      data: {
-        status: dto.status,
-        ...(dto.status === 'PICKED_UP' && { pickedUpAt: now }),
-        ...(dto.status === 'DELIVERED' && { deliveredAt: now }),
-        ...(dto.status === 'FAILED' && {
-          failedReason: dto.failedReason ?? 'Not specified',
-        }),
-      },
+    const deliveryMessage = `Order ${delivery.order.orderNumber}: ${dto.status
+      .replace('_', ' ')
+      .toLowerCase()}.`;
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.delivery.update({
+        where: { id: deliveryId },
+        data: {
+          status: dto.status,
+          ...(dto.status === 'PICKED_UP' && { pickedUpAt: now }),
+          ...(dto.status === 'DELIVERED' && { deliveredAt: now }),
+          ...(dto.status === 'FAILED' && {
+            failedReason: dto.failedReason ?? 'Not specified',
+          }),
+        },
+      });
+
+      await this.queueOrderStatusEmail(
+        tx,
+        delivery.orderId,
+        dto.status,
+        dto.status.replace('_', ' '),
+        deliveryMessage,
+        eventId,
+        dto.status === 'IN_TRANSIT'
+          ? 'Your order is on its way.'
+          : dto.status === 'FAILED'
+            ? 'Please contact the shop for assistance.'
+            : undefined,
+      );
+
+      if (dto.status === 'DELIVERED') {
+        await this.queueOrderReceiptEmail(
+          tx,
+          delivery.orderId,
+          undefined,
+          `delivery:${eventId}`,
+        );
+      }
+
+      return result;
     });
 
     if (dto.status === 'FAILED') {
@@ -1314,10 +1293,6 @@ export class OrdersService {
       );
     }
 
-    const deliveryMessage = `Order ${delivery.order.orderNumber}: ${dto.status
-      .replace('_', ' ')
-      .toLowerCase()}.`;
-
     await this.notify(
       [delivery.order.customerId],
       'DELIVERY',
@@ -1325,22 +1300,6 @@ export class OrdersService {
       deliveryMessage,
       { orderId: delivery.orderId },
     );
-
-    await this.emailOrderStatus(
-      delivery.orderId,
-      dto.status,
-      dto.status.replace('_', ' '),
-      deliveryMessage,
-      dto.status === 'IN_TRANSIT'
-        ? 'Your order is on its way.'
-        : dto.status === 'FAILED'
-          ? 'Please contact the shop for assistance.'
-          : undefined,
-    );
-
-    if (dto.status === 'DELIVERED') {
-      await this.emailOrderReceipt(delivery.orderId);
-    }
 
     return updated;
   }
@@ -1370,6 +1329,8 @@ export class OrdersService {
 
     for (const order of stale) {
       try {
+        const eventId = this.newEmailEventId();
+
         const done = await this.prisma.$transaction(async (tx) => {
           const claimed = await tx.order.updateMany({
             where: {
@@ -1399,6 +1360,18 @@ export class OrdersService {
             data: { status: 'CANCELLED' },
           });
 
+          const message = `Order ${order.orderNumber} was cancelled because it wasn't paid in time.`;
+
+          await this.queueOrderStatusEmail(
+            tx,
+            order.id,
+            'CANCELLED',
+            'Expired',
+            message,
+            eventId,
+            'You can place a new order whenever you are ready.',
+          );
+
           return true;
         });
 
@@ -1411,14 +1384,6 @@ export class OrdersService {
             'Order expired',
             message,
             { orderId: order.id },
-          );
-
-          await this.emailOrderStatus(
-            order.id,
-            'CANCELLED',
-            'Expired',
-            message,
-            'You can place a new order whenever you are ready.',
           );
         }
       } catch (error) {
