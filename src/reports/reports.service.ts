@@ -10,12 +10,11 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, Report, ReportStatus } from '@prisma/client';
-
+import { ArtisansService } from '../artisan/artisans.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ListingsService } from '../marketplace/listings.service';
 import { AuthUser } from '../common/decorators/current-user.decorator';
-
 import { MailService } from '../mail/mail.service';
 import { MailTemplatesService } from '../mail/mail-templates.service';
 import {
@@ -56,6 +55,7 @@ export class ReportsService {
     private readonly mail: MailService,
     private readonly mailTemplates: MailTemplatesService,
     private readonly config: ConfigService,
+    private readonly artisans: ArtisansService,
   ) {}
 
   // ---------- email helpers ----------
@@ -863,19 +863,26 @@ export class ReportsService {
       }
 
       case 'HIDE_REVIEW': {
-        if (report.targetType !== 'REVIEW') {
-          throw new BadRequestException(
-            'That action only applies to reviews.',
-          );
-        }
+  if (report.targetType !== 'REVIEW') {
+    throw new BadRequestException('That action only applies to reviews.');
+  }
 
-        await this.prisma.review.update({
-          where: { id: report.targetId },
-          data: { status: 'HIDDEN' },
-        });
+  // Hide and recalculate together, so the average never counts a hidden review.
+  await this.prisma.$transaction(async (tx) => {
+    const review = await tx.review.update({
+      where: { id: report.targetId },
+      data: { status: 'HIDDEN' },
+      select: { targetUserId: true, serviceBookingId: true },
+    });
 
-        return;
-      }
+    // Only reviews of completed artisan jobs affect an artisan's average.
+    if (review.targetUserId && review.serviceBookingId) {
+      await this.artisans.refreshRating(review.targetUserId, tx);
+    }
+  });
+
+  return;
+}
 
       case 'DEACTIVATE_USER': {
         const offenderId = await this.offenderOf(

@@ -29,8 +29,8 @@ import { OtpModule } from './otp/otp.module';
 import { ReportsModule } from './reports/reports.module';
 import { EventsModule } from './events/events.module';
 import { MarketplaceModule } from './marketplace/marketplace.module';
-import { ModerationModule } from './reports/moderation.module';
 import {NeighborhoodsModule} from './neighborhoods/neighborhoods.module';
+import {ArtisansModule} from './artisan/artisans.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -70,9 +70,9 @@ import {NeighborhoodsModule} from './neighborhoods/neighborhoods.module';
     ReportsModule,
     EventsModule,
     MarketplaceModule,
-    ModerationModule,
     NeighborhoodsModule,
     EmailOutboxModule,
+    ArtisansModule,
   ],
   providers: [
     {

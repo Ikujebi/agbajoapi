@@ -5,63 +5,63 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-} from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { Cron, CronExpression } from '@nestjs/schedule';
+} from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { Cron, CronExpression } from "@nestjs/schedule";
 import {
   MembershipRole,
   NotificationType,
   OrderStatus,
   Prisma,
-} from '@prisma/client';
-import { randomBytes } from 'crypto';
+} from "@prisma/client";
+import { randomBytes } from "crypto";
 
-import { PrismaService } from '../prisma/prisma.service';
-import { OrganizationsService } from '../organizations/organizations.service';
-import { OrgHoursService } from '../org-hours/org-hours.service';
-import { PermissionsService } from '../common/permissions/permissions.service';
-import { rolesWith } from '../common/permissions/permissions';
-import { AuthUser } from '../common/decorators/current-user.decorator';
+import { PrismaService } from "../prisma/prisma.service";
+import { OrganizationsService } from "../organizations/organizations.service";
+import { OrgHoursService } from "../org-hours/org-hours.service";
+import { PermissionsService } from "../common/permissions/permissions.service";
+import { rolesWith } from "../common/permissions/permissions";
+import { AuthUser } from "../common/decorators/current-user.decorator";
 import {
   AssignAgentDto,
   CreateOrderDto,
   UpdateDeliveryDto,
   UpdateOrderStatusDto,
-} from './dto';
-import { NotificationsService } from '../notifications/notifications.service';
-import { EmailOutboxService } from '../email-outbox/email-outbox.service';
+} from "./dto";
+import { NotificationsService } from "../notifications/notifications.service";
+import { EmailOutboxService } from "../email-outbox/email-outbox.service";
 
 type Tx = Prisma.TransactionClient;
 
 const NEXT: Record<OrderStatus, OrderStatus[]> = {
-  PENDING: ['CONFIRMED', 'CANCELLED'],
-  CONFIRMED: ['PROCESSING', 'CANCELLED'],
-  PROCESSING: ['READY_FOR_PICKUP', 'OUT_FOR_DELIVERY', 'CANCELLED'],
-  READY_FOR_PICKUP: ['DELIVERED', 'CANCELLED'],
-  OUT_FOR_DELIVERY: ['DELIVERED', 'CANCELLED'],
+  PENDING: ["CONFIRMED", "CANCELLED"],
+  CONFIRMED: ["PROCESSING", "CANCELLED"],
+  PROCESSING: ["READY_FOR_PICKUP", "OUT_FOR_DELIVERY", "CANCELLED"],
+  READY_FOR_PICKUP: ["DELIVERED", "CANCELLED"],
+  OUT_FOR_DELIVERY: ["DELIVERED", "CANCELLED"],
   DELIVERED: [],
   CANCELLED: [],
   REFUNDED: [],
 };
 
 const CUSTOMER_TEXT: Partial<Record<OrderStatus, string>> = {
-  CONFIRMED: 'has been confirmed',
-  PROCESSING: 'is being prepared',
-  READY_FOR_PICKUP: 'is ready for pickup',
-  OUT_FOR_DELIVERY: 'is on its way',
-  DELIVERED: 'has been delivered',
-  CANCELLED: 'was cancelled',
+  CONFIRMED: "has been confirmed",
+  PROCESSING: "is being prepared",
+  READY_FOR_PICKUP: "is ready for pickup",
+  OUT_FOR_DELIVERY: "is on its way",
+  DELIVERED: "has been delivered",
+  CANCELLED: "was cancelled",
 };
 
 const STATUS_LABELS: Partial<Record<OrderStatus, string>> = {
-  PENDING: 'Pending',
-  CONFIRMED: 'Confirmed',
-  PROCESSING: 'Being prepared',
-  READY_FOR_PICKUP: 'Ready for pickup',
-  OUT_FOR_DELIVERY: 'Out for delivery',
-  DELIVERED: 'Delivered',
-  CANCELLED: 'Cancelled',
-  REFUNDED: 'Refunded',
+  PENDING: "Pending",
+  CONFIRMED: "Confirmed",
+  PROCESSING: "Being prepared",
+  READY_FOR_PICKUP: "Ready for pickup",
+  OUT_FOR_DELIVERY: "Out for delivery",
+  DELIVERED: "Delivered",
+  CANCELLED: "Cancelled",
+  REFUNDED: "Refunded",
 };
 
 const UNPAID_EXPIRY_MS = 30 * 60 * 1000;
@@ -95,7 +95,7 @@ export class OrdersService {
 
     return (
       !!membership &&
-      membership.status === 'APPROVED' &&
+      membership.status === "APPROVED" &&
       roles.includes(membership.role)
     );
   }
@@ -105,8 +105,8 @@ export class OrdersService {
     const rows = await this.prisma.membership.findMany({
       where: {
         organizationId,
-        status: 'APPROVED',
-        role: { in: rolesWith('SHOP', 'order.manage') },
+        status: "APPROVED",
+        role: { in: rolesWith("SHOP", "order.manage") },
       },
       select: { userId: true },
     });
@@ -132,8 +132,8 @@ export class OrdersService {
   }
 
   private newOrderNumber() {
-    const date = new Date().toISOString().slice(2, 10).replace(/-/g, '');
-    return `NB-${date}-${randomBytes(3).toString('hex').toUpperCase()}`;
+    const date = new Date().toISOString().slice(2, 10).replace(/-/g, "");
+    return `NB-${date}-${randomBytes(3).toString("hex").toUpperCase()}`;
   }
 
   /** Builds a display name from the separate user name fields. */
@@ -144,34 +144,32 @@ export class OrdersService {
   }) {
     return [user.firstName, user.otherNames, user.lastName]
       .filter((name) => name?.trim())
-      .join(' ');
+      .join(" ");
   }
 
   private formatMoney(value: Prisma.Decimal | number | string) {
-    return new Intl.NumberFormat('en-NG', {
-      style: 'currency',
-      currency: 'NGN',
+    return new Intl.NumberFormat("en-NG", {
+      style: "currency",
+      currency: "NGN",
       minimumFractionDigits: 2,
     }).format(Number(value));
   }
 
   private formatDate(value: Date) {
-    return new Intl.DateTimeFormat('en-NG', {
-      dateStyle: 'medium',
-      timeStyle: 'short',
+    return new Intl.DateTimeFormat("en-NG", {
+      dateStyle: "medium",
+      timeStyle: "short",
     }).format(value);
   }
 
   private getOrderUrl(orderId: string) {
-    const baseUrl = this.config
-      .get<string>('APP_URL')
-      ?.replace(/\/+$/, '');
+    const baseUrl = this.config.get<string>("APP_URL")?.replace(/\/+$/, "");
 
     return baseUrl ? `${baseUrl}/orders/${orderId}` : undefined;
   }
 
   private newEmailEventId() {
-    return randomBytes(12).toString('hex');
+    return randomBytes(12).toString("hex");
   }
 
   // ---------- email outbox helpers ----------
@@ -206,8 +204,8 @@ export class OrdersService {
     const staff = await tx.membership.findMany({
       where: {
         organizationId,
-        status: 'APPROVED',
-        role: { in: rolesWith('SHOP', 'order.manage') },
+        status: "APPROVED",
+        role: { in: rolesWith("SHOP", "order.manage") },
       },
       select: {
         userId: true,
@@ -229,7 +227,9 @@ export class OrdersService {
       subtotal: this.formatMoney(order.subtotal),
       deliveryFee: this.formatMoney(order.deliveryFee),
       total: this.formatMoney(order.totalAmount),
-      fulfillmentType: order.deliveryAddress ? 'DELIVERY' as const : 'PICKUP' as const,
+      fulfillmentType: order.deliveryAddress
+        ? ("DELIVERY" as const)
+        : ("PICKUP" as const),
       deliveryAddress: order.deliveryAddress ?? undefined,
       customerNote: order.deliveryNotes ?? undefined,
       orderUrl: this.getOrderUrl(order.id),
@@ -248,10 +248,7 @@ export class OrdersService {
   }
 
   /** Queues the order confirmation email for the customer. */
-  private async queueOrderConfirmationEmail(
-    tx: Tx,
-    orderId: string,
-  ) {
+  private async queueOrderConfirmationEmail(tx: Tx, orderId: string) {
     const order = await tx.order.findUnique({
       where: { id: orderId },
       include: {
@@ -276,7 +273,7 @@ export class OrdersService {
           quantity: item.quantity,
         })),
         total: this.formatMoney(order.totalAmount),
-        fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
+        fulfillmentType: order.deliveryAddress ? "DELIVERY" : "PICKUP",
         orderUrl: this.getOrderUrl(order.id),
       },
     });
@@ -341,7 +338,7 @@ export class OrdersService {
     if (!order) return;
 
     const successfulPayment = order.payments.find(
-      (payment) => payment.status === 'SUCCEEDED',
+      (payment) => payment.status === "SUCCEEDED",
     );
 
     const paymentMethod = successfulPayment?.method
@@ -369,8 +366,8 @@ export class OrdersService {
         deliveryFee: this.formatMoney(order.deliveryFee),
         total: this.formatMoney(order.totalAmount),
         paymentMethod,
-        paymentStatus: successfulPayment ? 'Paid' : 'Payment pending',
-        fulfillmentType: order.deliveryAddress ? 'DELIVERY' : 'PICKUP',
+        paymentStatus: successfulPayment ? "Paid" : "Payment pending",
+        fulfillmentType: order.deliveryAddress ? "DELIVERY" : "PICKUP",
         deliveryAddress: order.deliveryAddress ?? undefined,
         orderUrl: this.getOrderUrl(order.id),
       },
@@ -397,7 +394,7 @@ export class OrdersService {
     if (!order) return;
 
     const successfulPayment = order.payments.find(
-      (payment) => payment.status === 'SUCCEEDED',
+      (payment) => payment.status === "SUCCEEDED",
     );
 
     const reference = paymentReference ?? order.orderNumber;
@@ -413,7 +410,7 @@ export class OrdersService {
         amountPaid: this.formatMoney(
           successfulPayment?.amount ?? order.totalAmount,
         ),
-        currency: 'NGN',
+        currency: "NGN",
         paymentMethod: successfulPayment?.method
           ? String(successfulPayment.method)
           : undefined,
@@ -430,7 +427,7 @@ export class OrdersService {
   private async commitStock(tx: Tx, orderId: string, actorId?: string) {
     const items = await tx.orderItem.findMany({
       where: { orderId, productId: { not: null } },
-      orderBy: { productId: 'asc' },
+      orderBy: { productId: "asc" },
     });
 
     for (const item of items) {
@@ -445,10 +442,10 @@ export class OrdersService {
       await tx.stockMovement.create({
         data: {
           productId: product.id,
-          type: 'SALE',
+          type: "SALE",
           delta: -item.quantity,
           quantityAfter: product.quantity,
-          reason: 'Order confirmed',
+          reason: "Order confirmed",
           reference: orderId,
           createdById: actorId,
         },
@@ -459,7 +456,7 @@ export class OrdersService {
   private async releaseReservation(tx: Tx, orderId: string) {
     const items = await tx.orderItem.findMany({
       where: { orderId, productId: { not: null } },
-      orderBy: { productId: 'asc' },
+      orderBy: { productId: "asc" },
     });
 
     for (const item of items) {
@@ -475,7 +472,7 @@ export class OrdersService {
   private async returnStock(tx: Tx, orderId: string, actorId?: string) {
     const items = await tx.orderItem.findMany({
       where: { orderId, productId: { not: null } },
-      orderBy: { productId: 'asc' },
+      orderBy: { productId: "asc" },
     });
 
     for (const item of items) {
@@ -489,10 +486,10 @@ export class OrdersService {
       await tx.stockMovement.create({
         data: {
           productId: product.id,
-          type: 'RETURN',
+          type: "RETURN",
           delta: item.quantity,
           quantityAfter: product.quantity,
-          reason: 'Order cancelled',
+          reason: "Order cancelled",
           reference: orderId,
           createdById: actorId,
         },
@@ -510,10 +507,10 @@ export class OrdersService {
     });
 
     if (!order) {
-      return { confirmed: false, reason: 'missing' as const };
+      return { confirmed: false, reason: "missing" as const };
     }
 
-    if (order.status !== 'PENDING') {
+    if (order.status !== "PENDING") {
       return { confirmed: false, reason: order.status };
     }
 
@@ -521,7 +518,7 @@ export class OrdersService {
 
     await tx.order.update({
       where: { id: orderId },
-      data: { status: 'CONFIRMED' },
+      data: { status: "CONFIRMED" },
     });
 
     await this.queueOrderConfirmationEmail(tx, orderId);
@@ -539,16 +536,16 @@ export class OrdersService {
     if (lateReason) {
       await this.notify(
         [order.customerId],
-        'PAYMENT',
-        'Payment received for a cancelled order',
+        "PAYMENT",
+        "Payment received for a cancelled order",
         `We received your payment for order ${order.orderNumber}, but the order was already ${lateReason.toLowerCase()}. It will be refunded.`,
         { orderId },
       );
 
       await this.notify(
         await this.staffIds(order.organizationId),
-        'PAYMENT',
-        'Refund needed',
+        "PAYMENT",
+        "Refund needed",
         `Payment arrived for ${order.orderNumber} after it was ${lateReason.toLowerCase()}. Please refund the customer.`,
         { orderId },
       );
@@ -558,16 +555,16 @@ export class OrdersService {
 
     await this.notify(
       [order.customerId],
-      'PAYMENT',
-      'Payment received',
+      "PAYMENT",
+      "Payment received",
       `Order ${order.orderNumber} is paid and confirmed.`,
       { orderId },
     );
 
     await this.notify(
       await this.staffIds(order.organizationId),
-      'ORDER',
-      'Paid order',
+      "ORDER",
+      "Paid order",
       `Order ${order.orderNumber} (₦${order.totalAmount.toFixed(2)}) has been paid.`,
       { orderId },
     );
@@ -577,31 +574,21 @@ export class OrdersService {
       const payment = await tx.payment.findFirst({
         where: {
           orderId,
-          status: 'SUCCEEDED',
+          status: "SUCCEEDED",
         },
-        orderBy: { paidAt: 'desc' },
+        orderBy: { paidAt: "desc" },
         select: {
           id: true,
-          reference: true,
+          providerRef: true,
         },
       });
 
-      const reference = payment?.reference ?? order.orderNumber;
+      const reference = payment?.providerRef ?? order.orderNumber;
       const eventId = payment?.id ?? reference;
 
-      await this.queuePaymentConfirmationEmail(
-        tx,
-        orderId,
-        reference,
-        eventId,
-      );
+      await this.queuePaymentConfirmationEmail(tx, orderId, reference, eventId);
 
-      await this.queueOrderReceiptEmail(
-        tx,
-        orderId,
-        reference,
-        eventId,
-      );
+      await this.queueOrderReceiptEmail(tx, orderId, reference, eventId);
     });
   }
 
@@ -610,19 +597,19 @@ export class OrdersService {
   async create(userId: string, dto: CreateOrderDto) {
     const org = await this.orgs.getOrThrow(dto.organizationId);
 
-    if (org.type !== 'SHOP' || !org.isActive) {
-      throw new BadRequestException('This shop is not accepting orders');
+    if (org.type !== "SHOP" || !org.isActive) {
+      throw new BadRequestException("This shop is not accepting orders");
     }
 
     if (!org.acceptingOrders) {
       throw new BadRequestException(
-        'This shop has paused orders. Please try again later.',
+        "This shop has paused orders. Please try again later.",
       );
     }
 
     await this.hours.assertOpen(
       org.id,
-      'OPENING',
+      "OPENING",
       `${org.name} is closed right now`,
     );
 
@@ -651,19 +638,19 @@ export class OrdersService {
       where: {
         id: { in: [...quantityByProductId.keys()] },
         organizationId: org.id,
-        status: 'ACTIVE',
+        status: "ACTIVE",
         isAvailable: true,
       },
     });
 
     if (products.length !== quantityByProductId.size) {
-      throw new BadRequestException('One or more products are unavailable');
+      throw new BadRequestException("One or more products are unavailable");
     }
 
     const delivery = !!dto.deliveryAddress?.trim();
 
     const deliveryFee = new Prisma.Decimal(
-      delivery ? Number(this.config.get('DELIVERY_FEE')) || 0 : 0,
+      delivery ? Number(this.config.get("DELIVERY_FEE")) || 0 : 0,
     );
 
     const lines = products
@@ -685,8 +672,7 @@ export class OrdersService {
 
     const total = subtotal.add(deliveryFee);
 
-    const customerName =
-      dto.customerName?.trim() || this.formatUserName(user);
+    const customerName = dto.customerName?.trim() || this.formatUserName(user);
 
     const customerPhone = dto.customerPhone?.trim() || user.phone;
 
@@ -734,8 +720,8 @@ export class OrdersService {
                 organizationId: org.id,
                 payerId: userId,
                 amount: total,
-                method: 'CASH',
-                status: 'PENDING',
+                method: "CASH",
+                status: "PENDING",
               },
             },
           }),
@@ -747,7 +733,7 @@ export class OrdersService {
                 pickupAddress: org.address,
                 recipientName: customerName,
                 recipientPhone: customerPhone,
-                trackingCode: `TRK-${randomBytes(4).toString('hex').toUpperCase()}`,
+                trackingCode: `TRK-${randomBytes(4).toString("hex").toUpperCase()}`,
               },
             },
           }),
@@ -786,12 +772,12 @@ export class OrdersService {
 
     await this.notify(
       await this.staffIds(org.id),
-      'ORDER',
-      'New order',
+      "ORDER",
+      "New order",
       `${order.orderNumber} · ₦${total.toFixed(2)} · ${
         dto.payCash
-          ? `pay on ${delivery ? 'delivery' : 'pickup'}`
-          : 'awaiting online payment'
+          ? `pay on ${delivery ? "delivery" : "pickup"}`
+          : "awaiting online payment"
       }`,
       { orderId: order.id },
     );
@@ -830,7 +816,7 @@ export class OrdersService {
     return this.prisma.order.findMany({
       where: { customerId: userId },
       include: this.include,
-      orderBy: { placedAt: 'desc' },
+      orderBy: { placedAt: "desc" },
       take: 100,
     });
   }
@@ -840,7 +826,7 @@ export class OrdersService {
     organizationId: string,
     status?: OrderStatus,
   ) {
-    await this.permissions.assert(user, organizationId, 'order.view');
+    await this.permissions.assert(user, organizationId, "order.view");
 
     return this.prisma.order.findMany({
       where: {
@@ -848,7 +834,7 @@ export class OrdersService {
         ...(status && { status }),
       },
       include: this.include,
-      orderBy: { placedAt: 'desc' },
+      orderBy: { placedAt: "desc" },
       take: 200,
     });
   }
@@ -860,7 +846,7 @@ export class OrdersService {
     });
 
     if (!order) {
-      throw new NotFoundException('Order not found');
+      throw new NotFoundException("Order not found");
     }
 
     const isCustomer = order.customerId === user.id;
@@ -869,7 +855,7 @@ export class OrdersService {
     if (
       !isCustomer &&
       !isAssignedRider &&
-      !(await this.permissions.can(user, order.organizationId, 'order.view'))
+      !(await this.permissions.can(user, order.organizationId, "order.view"))
     ) {
       throw new ForbiddenException();
     }
@@ -900,22 +886,22 @@ export class OrdersService {
         },
         data: {
           status: to,
-          ...(to === 'CANCELLED' && { cancelledAt: new Date() }),
+          ...(to === "CANCELLED" && { cancelledAt: new Date() }),
         },
       });
 
       if (claimed.count === 0) {
         throw new ConflictException(
-          'This order was just updated by someone else. Refresh and retry.',
+          "This order was just updated by someone else. Refresh and retry.",
         );
       }
 
-      if (order.status === 'PENDING' && to === 'CONFIRMED') {
+      if (order.status === "PENDING" && to === "CONFIRMED") {
         await this.commitStock(tx, order.id, actorId);
       }
 
-      if (to === 'CANCELLED') {
-        if (order.status === 'PENDING') {
+      if (to === "CANCELLED") {
+        if (order.status === "PENDING") {
           await this.releaseReservation(tx, order.id);
         } else {
           await this.returnStock(tx, order.id, actorId);
@@ -923,27 +909,27 @@ export class OrdersService {
 
         await tx.delivery.updateMany({
           where: { orderId: order.id },
-          data: { status: 'CANCELLED' },
+          data: { status: "CANCELLED" },
         });
 
         await tx.payment.updateMany({
           where: {
             orderId: order.id,
-            status: 'PENDING',
+            status: "PENDING",
           },
-          data: { status: 'FAILED' },
+          data: { status: "FAILED" },
         });
       }
 
-      if (to === 'DELIVERED') {
+      if (to === "DELIVERED") {
         await tx.payment.updateMany({
           where: {
             orderId: order.id,
-            method: 'CASH',
-            status: 'PENDING',
+            method: "CASH",
+            status: "PENDING",
           },
           data: {
-            status: 'SUCCEEDED',
+            status: "SUCCEEDED",
             paidAt: new Date(),
           },
         });
@@ -951,10 +937,10 @@ export class OrdersService {
         await tx.delivery.updateMany({
           where: {
             orderId: order.id,
-            status: { notIn: ['DELIVERED', 'CANCELLED'] },
+            status: { notIn: ["DELIVERED", "CANCELLED"] },
           },
           data: {
-            status: 'DELIVERED',
+            status: "DELIVERED",
             deliveredAt: new Date(),
           },
         });
@@ -990,22 +976,22 @@ export class OrdersService {
     });
 
     if (!order) {
-      throw new NotFoundException('Order not found');
+      throw new NotFoundException("Order not found");
     }
 
     const staff = await this.permissions.can(
       user,
       order.organizationId,
-      'order.manage',
+      "order.manage",
     );
 
     const isCustomer = order.customerId === user.id;
 
     if (
       !staff &&
-      !(isCustomer && to === 'CANCELLED' && order.status === 'PENDING')
+      !(isCustomer && to === "CANCELLED" && order.status === "PENDING")
     ) {
-      throw new ForbiddenException('You cannot make this change');
+      throw new ForbiddenException("You cannot make this change");
     }
 
     if (!NEXT[order.status].includes(to)) {
@@ -1015,27 +1001,27 @@ export class OrdersService {
     }
 
     if (
-      to === 'CONFIRMED' &&
-      !order.payments.some((payment) => payment.method === 'CASH')
+      to === "CONFIRMED" &&
+      !order.payments.some((payment) => payment.method === "CASH")
     ) {
       throw new BadRequestException(
-        'Online orders are confirmed automatically once paid',
+        "Online orders are confirmed automatically once paid",
       );
     }
 
-    if (to === 'OUT_FOR_DELIVERY' && !order.delivery) {
-      throw new BadRequestException('This order has no delivery address');
+    if (to === "OUT_FOR_DELIVERY" && !order.delivery) {
+      throw new BadRequestException("This order has no delivery address");
     }
 
-    if (to === 'READY_FOR_PICKUP' && order.delivery) {
-      throw new BadRequestException('This is a delivery order');
+    if (to === "READY_FOR_PICKUP" && order.delivery) {
+      throw new BadRequestException("This is a delivery order");
     }
 
     const refundRequired =
-      to === 'CANCELLED' &&
+      to === "CANCELLED" &&
       order.payments.some(
         (payment) =>
-          payment.status === 'SUCCEEDED' && payment.method !== 'CASH',
+          payment.status === "SUCCEEDED" && payment.method !== "CASH",
       );
 
     let statusEmail:
@@ -1050,15 +1036,15 @@ export class OrdersService {
     if (!isCustomer || staff) {
       const message = `Your order ${order.orderNumber} ${
         CUSTOMER_TEXT[to] ?? to.toLowerCase()
-      }.${refundRequired ? ' Your refund will be processed by the shop.' : ''}`;
+      }.${refundRequired ? " Your refund will be processed by the shop." : ""}`;
 
       statusEmail = {
         status: to,
         statusLabel: STATUS_LABELS[to] ?? to,
         message,
         nextStep:
-          to === 'CONFIRMED'
-            ? 'The shop will begin processing your order.'
+          to === "CONFIRMED"
+            ? "The shop will begin processing your order."
             : undefined,
       };
     }
@@ -1068,22 +1054,22 @@ export class OrdersService {
     if (isCustomer && !staff) {
       await this.notify(
         await this.staffIds(order.organizationId),
-        'ORDER',
-        'Order cancelled',
+        "ORDER",
+        "Order cancelled",
         `${order.orderNumber} was cancelled by the customer.`,
         { orderId },
       );
     } else if (statusEmail) {
       await this.notify(
         [order.customerId],
-        'ORDER',
-        'Order update',
+        "ORDER",
+        "Order update",
         statusEmail.message,
         { orderId },
       );
     }
 
-    if (to === 'DELIVERED') {
+    if (to === "DELIVERED") {
       await this.prisma.$transaction(async (tx) => {
         await this.queueOrderReceiptEmail(
           tx,
@@ -1110,28 +1096,24 @@ export class OrdersService {
     });
 
     if (!order) {
-      throw new NotFoundException('Order not found');
+      throw new NotFoundException("Order not found");
     }
 
-    await this.permissions.assert(
-      user,
-      order.organizationId,
-      'order.manage',
-    );
+    await this.permissions.assert(user, order.organizationId, "order.manage");
 
     if (!order.delivery) {
-      throw new BadRequestException('This order has no delivery');
+      throw new BadRequestException("This order has no delivery");
     }
 
-    if (['DELIVERED', 'CANCELLED'].includes(order.delivery.status)) {
-      throw new BadRequestException('Delivery already closed');
+    if (["DELIVERED", "CANCELLED"].includes(order.delivery.status)) {
+      throw new BadRequestException("Delivery already closed");
     }
 
-    const agentRoles = rolesWith('SHOP', 'delivery.perform');
+    const agentRoles = rolesWith("SHOP", "delivery.perform");
 
     if (!(await this.hasRole(dto.agentId, order.organizationId, agentRoles))) {
       throw new BadRequestException(
-        'Agent must be an approved rider or staff member of this shop',
+        "Agent must be an approved rider or staff member of this shop",
       );
     }
 
@@ -1142,7 +1124,7 @@ export class OrdersService {
         where: { id: order.delivery!.id },
         data: {
           assignedAgentId: dto.agentId,
-          status: 'ASSIGNED',
+          status: "ASSIGNED",
           assignedAt: new Date(),
         },
       });
@@ -1150,11 +1132,11 @@ export class OrdersService {
       await this.queueOrderStatusEmail(
         tx,
         orderId,
-        'RIDER_ASSIGNED',
-        'Rider assigned',
+        "RIDER_ASSIGNED",
+        "Rider assigned",
         `A rider has been assigned to your order ${order.orderNumber}.`,
         eventId,
-        'Your rider will contact you regarding delivery.',
+        "Your rider will contact you regarding delivery.",
       );
 
       return result;
@@ -1162,16 +1144,16 @@ export class OrdersService {
 
     await this.notify(
       [dto.agentId],
-      'DELIVERY',
-      'New delivery',
+      "DELIVERY",
+      "New delivery",
       `Deliver order ${order.orderNumber} to ${order.delivery.deliveryAddress}.`,
       { orderId },
     );
 
     await this.notify(
       [order.customerId],
-      'DELIVERY',
-      'Rider assigned',
+      "DELIVERY",
+      "Rider assigned",
       `A rider has been assigned to order ${order.orderNumber}.`,
       { orderId },
     );
@@ -1190,13 +1172,13 @@ export class OrdersService {
     });
 
     if (!delivery) {
-      throw new NotFoundException('Delivery not found');
+      throw new NotFoundException("Delivery not found");
     }
 
     const staff = await this.permissions.can(
       user,
       delivery.organizationId,
-      'order.manage',
+      "order.manage",
     );
 
     if (!staff && delivery.assignedAgentId !== user.id) {
@@ -1204,44 +1186,40 @@ export class OrdersService {
     }
 
     if (
-      !['PICKED_UP', 'IN_TRANSIT', 'DELIVERED', 'FAILED'].includes(dto.status)
+      !["PICKED_UP", "IN_TRANSIT", "DELIVERED", "FAILED"].includes(dto.status)
     ) {
-      throw new BadRequestException('Invalid status');
+      throw new BadRequestException("Invalid status");
     }
 
-    if (['DELIVERED', 'CANCELLED'].includes(delivery.status)) {
-      throw new BadRequestException('Delivery already closed');
+    if (["DELIVERED", "CANCELLED"].includes(delivery.status)) {
+      throw new BadRequestException("Delivery already closed");
     }
 
     let currentOrder = delivery.order;
 
-    if (dto.status === 'PICKED_UP' || dto.status === 'DELIVERED') {
-      if (currentOrder.status === 'PROCESSING') {
-        await this.applyStatus(
-          currentOrder,
-          'OUT_FOR_DELIVERY',
-          user.id,
-        );
+    if (dto.status === "PICKED_UP" || dto.status === "DELIVERED") {
+      if (currentOrder.status === "PROCESSING") {
+        await this.applyStatus(currentOrder, "OUT_FOR_DELIVERY", user.id);
 
         currentOrder = {
           ...currentOrder,
-          status: 'OUT_FOR_DELIVERY',
+          status: "OUT_FOR_DELIVERY",
         };
       }
     }
 
     if (
-      dto.status === 'DELIVERED' &&
-      currentOrder.status === 'OUT_FOR_DELIVERY'
+      dto.status === "DELIVERED" &&
+      currentOrder.status === "OUT_FOR_DELIVERY"
     ) {
-      await this.applyStatus(currentOrder, 'DELIVERED', user.id);
+      await this.applyStatus(currentOrder, "DELIVERED", user.id);
     }
 
     const now = new Date();
     const eventId = this.newEmailEventId();
 
     const deliveryMessage = `Order ${delivery.order.orderNumber}: ${dto.status
-      .replace('_', ' ')
+      .replace("_", " ")
       .toLowerCase()}.`;
 
     const updated = await this.prisma.$transaction(async (tx) => {
@@ -1249,10 +1227,10 @@ export class OrdersService {
         where: { id: deliveryId },
         data: {
           status: dto.status,
-          ...(dto.status === 'PICKED_UP' && { pickedUpAt: now }),
-          ...(dto.status === 'DELIVERED' && { deliveredAt: now }),
-          ...(dto.status === 'FAILED' && {
-            failedReason: dto.failedReason ?? 'Not specified',
+          ...(dto.status === "PICKED_UP" && { pickedUpAt: now }),
+          ...(dto.status === "DELIVERED" && { deliveredAt: now }),
+          ...(dto.status === "FAILED" && {
+            failedReason: dto.failedReason ?? "Not specified",
           }),
         },
       });
@@ -1261,17 +1239,17 @@ export class OrdersService {
         tx,
         delivery.orderId,
         dto.status,
-        dto.status.replace('_', ' '),
+        dto.status.replace("_", " "),
         deliveryMessage,
         eventId,
-        dto.status === 'IN_TRANSIT'
-          ? 'Your order is on its way.'
-          : dto.status === 'FAILED'
-            ? 'Please contact the shop for assistance.'
+        dto.status === "IN_TRANSIT"
+          ? "Your order is on its way."
+          : dto.status === "FAILED"
+            ? "Please contact the shop for assistance."
             : undefined,
       );
 
-      if (dto.status === 'DELIVERED') {
+      if (dto.status === "DELIVERED") {
         await this.queueOrderReceiptEmail(
           tx,
           delivery.orderId,
@@ -1283,11 +1261,11 @@ export class OrdersService {
       return result;
     });
 
-    if (dto.status === 'FAILED') {
+    if (dto.status === "FAILED") {
       await this.notify(
         await this.staffIds(delivery.organizationId),
-        'DELIVERY',
-        'Delivery failed',
+        "DELIVERY",
+        "Delivery failed",
         `${delivery.order.orderNumber}: ${updated.failedReason}`,
         { orderId: delivery.orderId },
       );
@@ -1295,8 +1273,8 @@ export class OrdersService {
 
     await this.notify(
       [delivery.order.customerId],
-      'DELIVERY',
-      'Delivery update',
+      "DELIVERY",
+      "Delivery update",
       deliveryMessage,
       { orderId: delivery.orderId },
     );
@@ -1311,12 +1289,12 @@ export class OrdersService {
   async expireUnpaid() {
     const stale = await this.prisma.order.findMany({
       where: {
-        status: 'PENDING',
+        status: "PENDING",
         placedAt: {
           lt: new Date(Date.now() - UNPAID_EXPIRY_MS),
         },
         payments: {
-          none: { method: 'CASH' },
+          none: { method: "CASH" },
         },
       },
       select: {
@@ -1335,10 +1313,10 @@ export class OrdersService {
           const claimed = await tx.order.updateMany({
             where: {
               id: order.id,
-              status: 'PENDING',
+              status: "PENDING",
             },
             data: {
-              status: 'CANCELLED',
+              status: "CANCELLED",
               cancelledAt: new Date(),
             },
           });
@@ -1350,14 +1328,14 @@ export class OrdersService {
           await tx.payment.updateMany({
             where: {
               orderId: order.id,
-              status: 'PENDING',
+              status: "PENDING",
             },
-            data: { status: 'FAILED' },
+            data: { status: "FAILED" },
           });
 
           await tx.delivery.updateMany({
             where: { orderId: order.id },
-            data: { status: 'CANCELLED' },
+            data: { status: "CANCELLED" },
           });
 
           const message = `Order ${order.orderNumber} was cancelled because it wasn't paid in time.`;
@@ -1365,11 +1343,11 @@ export class OrdersService {
           await this.queueOrderStatusEmail(
             tx,
             order.id,
-            'CANCELLED',
-            'Expired',
+            "CANCELLED",
+            "Expired",
             message,
             eventId,
-            'You can place a new order whenever you are ready.',
+            "You can place a new order whenever you are ready.",
           );
 
           return true;
@@ -1380,8 +1358,8 @@ export class OrdersService {
 
           await this.notify(
             [order.customerId],
-            'ORDER',
-            'Order expired',
+            "ORDER",
+            "Order expired",
             message,
             { orderId: order.id },
           );

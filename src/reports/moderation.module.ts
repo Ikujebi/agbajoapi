@@ -3,9 +3,10 @@ import { Module } from '@nestjs/common';
 import { MarketplaceModule } from '../marketplace/marketplace.module';
 import { ReportsController } from './reports.controller';
 import { ReportsService } from './reports.service';
+import { ArtisansModule } from '../artisan/artisans.module';
 
 @Module({
-  imports: [MarketplaceModule],
+  imports: [MarketplaceModule, ArtisansModule],
   controllers: [ReportsController],
   providers: [ReportsService],
 })
